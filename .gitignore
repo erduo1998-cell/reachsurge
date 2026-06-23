@@ -1,0 +1,72 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ── 虚拟环境 ──
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ── 测试 / 类型 / 覆盖率 ──
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+cache/
+
+# ── ReachSurge 运行时数据（含线索、知识库、号池配额，严禁入库）──
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# ── 密钥 / 环境配置（含真实 API key、SMTP/IMAP 凭证，严禁入库）──
+.env
+.env.*
+!.env.example
+
+# ── last30days 引擎（独立项目，默认未启用，用户自行安装）──
+last30days/
+
+# ── macOS / 编辑器 / 系统噪声 ──
+.DS_Store
+._*
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.bak*
+*.orig
