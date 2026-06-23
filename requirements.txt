@@ -1,0 +1,27 @@
+# ReachSurge 运行依赖。
+# 每个包后面标注代码里的真实 import 来源（文件:用途），便于审计与精简。
+# 标准库（os/sys/re/json/sqlite3/smtplib/imaplib/subprocess/urllib 等）不在此列出。
+
+# MCP 协议服务端：mcp_server.py 暴露工具集合的底层 SDK
+mcp>=1.0
+
+# HTTP 客户端：多源 adapter 与 LLM 调用主力
+#   mcp_server.py / sources/{tavily,hunter_discover,company_intel,serpapi_maps,overpass}.py
+#   sources/enrichment_providers/providers/hunter.py
+httpx>=0.27
+
+# 同步 HTTP：仅 sources/social_scout.py（TikTok/Instagram 抓取）使用
+requests>=2.31
+
+# DNS 查询（MX 记录）：tools/email_verify.py、sources/email_enrich.py
+dnspython>=2.4
+
+# 密钥/凭证加密：storage/db.py 的 Fernet 对称加密（号池 API key、SMTP/IMAP 密码落库前加密）
+cryptography>=42.0
+
+# .env 加载：mcp_server.py / sources/company_intel.py 启动时把 profiles/*.env 注入子进程
+python-dotenv>=1.0
+
+# 浏览器自动化（过 WAF / 渲染 JS）：sources/{europages,customs_importyeti}.py
+# 装完需执行 `playwright install chromium` 下载浏览器
+playwright>=1.40
