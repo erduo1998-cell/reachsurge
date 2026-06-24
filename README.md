@@ -223,3 +223,13 @@ MIT，见 [LICENSE](LICENSE)。
 ## 贡献
 
 欢迎提 issue 和 PR。改动数据源或新增工具时，请保持「工具必须接进 `search_leads` 路由表，而非裸挂独立 Tool 让 agent 自己选」的原则——富集类（`enrich_*`）工具保持独立，发现类（拿新线索）工具应接入路由。
+
+---
+
+## 联系作者
+
+有问题、想交流、或者想一起把获客流水线跑起来,扫码加我微信:
+
+<p align="center">
+  <img src="assets/wechat-qr.jpg" alt="耳朵 微信二维码" width="260">
+</p>
