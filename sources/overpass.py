@@ -7,8 +7,8 @@
 - 不依赖 Clash IP 质量 (A 类), 代理仅用于 WSL 出墙。
 
 号池应用 (验证 KeyPool 在发现层):
-- 4 个公共端点 = KeyPool 里 provider='overpass' 的成员 (免 key, endpoint_url 承载)。
-- 首次运行 bootstrap: 若号池无 overpass 端点, 自动投喂 4 个默认公共端点。
+- 6 个公共端点 = KeyPool 里 provider='overpass' 的成员 (免 key, endpoint_url 承载)。
+- 首次运行 bootstrap: 若号池无 overpass 端点, 自动投喂 6 个默认公共端点。
 - acquire 轮询; 单端点 429 → mark_failed → 自动切下一个; 全耗尽返回 []。
 
 返回 LeadCandidate (复用 sources.base), 过滤有 email 或 website 的商户。

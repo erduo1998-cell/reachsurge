@@ -25,7 +25,7 @@ from typing import Optional
 from storage.db import _encrypt_field, _decrypt_field, DATA_DIR
 
 KEYPOOL_DB = DATA_DIR / "keypool.db"
-DEFAULT_TENANT = "ear"  # 默认租户; 产品化时多租户仍贯穿此字段
+DEFAULT_TENANT = "default"  # 默认租户; 产品化时多租户仍贯穿此字段
 
 
 # ── 连接 & 建表 ──
@@ -46,7 +46,7 @@ def init_keypool():
             CREATE TABLE IF NOT EXISTS api_key_pool (
                 key_id          TEXT PRIMARY KEY,
                 provider        TEXT NOT NULL,           -- overpass/hunter/apollo/tavily/...
-                tenant_id       TEXT NOT NULL DEFAULT 'ear',
+                tenant_id       TEXT NOT NULL DEFAULT 'default',
                 label           TEXT DEFAULT '',         -- 可读标签
                 api_key         TEXT DEFAULT '',         -- Fernet 加密; 公共端点可为空
                 endpoint_url    TEXT DEFAULT '',         -- overpass 多端点 / 自定义 API base
@@ -81,7 +81,7 @@ def init_keypool():
             CREATE TABLE IF NOT EXISTS usage_log (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts        TEXT DEFAULT (datetime('now')),
-                tenant_id TEXT DEFAULT 'ear',
+                tenant_id TEXT DEFAULT 'default',
                 provider  TEXT NOT NULL,
                 key_id    TEXT DEFAULT '',
                 proxy_id  TEXT DEFAULT '',

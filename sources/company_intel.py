@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ── DeepSeek 配置 (从 env 读, mcp_server.py 启动时 load_dotenv 已注入) ──
 _DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 _DEEPSEEK_BASE = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
-_DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat").strip()
+_DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash").strip()
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -267,9 +267,15 @@ cooperation_level 判定标准:
 
 
 def _call_deepseek(prompt: str) -> str:
-    """POST DeepSeek chat/completions (json mode), 返回 content 文本。"""
+    """POST DeepSeek chat/completions (json mode), 返回 content 文本。
+
+    key 缺失时优雅降级 (与 _llm_filter_leads / hunter_discover 一致): 不 raise,
+    warning + 返回空串, 让 _judge 走 _parse_json("") 兜底 (cooperation_level=unknown,
+    confidence=low), enrich_company_profile 工具不崩而是降级返回低置信画像。"""
     if not _DEEPSEEK_KEY:
-        raise RuntimeError("DEEPSEEK_API_KEY 未配置 (检查 .env 配置文件是否 load_dotenv)")
+        _log("WARNING: DEEPSEEK_API_KEY 未配置, 公司画像判断降级(返回低置信结果, "
+             "检查 .env 是否被加载)")
+        return ""
     url = f"{_DEEPSEEK_BASE}/chat/completions"
     body = {
         "model": _DEEPSEEK_MODEL,
@@ -419,6 +425,9 @@ if __name__ == "__main__":
     _env = os.environ.get("LEADGEN_ENV_FILE", "").strip()
     if _env:
         load_dotenv(_env)
+    else:
+        # 自动加载项目根 .env (本文件在 sources/ 子目录, 项目根 = 上两级)
+        load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
     # 重新读取 env (load_dotenv 后)
     _DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 

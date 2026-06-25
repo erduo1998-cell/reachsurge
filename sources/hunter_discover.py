@@ -115,7 +115,7 @@ def _extract_product_keywords(query: str) -> list:
     if not key or not (query or "").strip():
         return []
     base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat").strip()
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash").strip()
     body = {
         "model": model,
         "messages": [{"role": "user", "content": _PROMPT_EXTRACT.format(q=query)}],

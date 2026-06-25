@@ -31,13 +31,18 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # 加载 profile .env —— MCP 客户端的 env 段通常只透传 HOME/LEADGEN_DATA_DIR,
-# HUNTER_API_KEY / http_proxy 等需自行 load_dotenv(LEADGEN_ENV_FILE) 才进得了子进程 environ。
+# HUNTER_API_KEY / http_proxy 等需进得了子进程 environ。
+# 优先 LEADGEN_ENV_FILE (MCP 客户端显式指定); 否则自动加载项目根 .env (本文件所在目录),
+# 小白在仓库根建好 .env 填好 key 即可生效, 不用额外配环境变量。
 # 出错不阻断启动, 仅相关 provider 降级。
 try:
     from dotenv import load_dotenv
+    _project_root = os.path.dirname(os.path.abspath(__file__))
     _env_file = os.environ.get("LEADGEN_ENV_FILE", "").strip()
     if _env_file:
         load_dotenv(_env_file)
+    else:
+        load_dotenv(os.path.join(_project_root, ".env"))
 except Exception:
     pass
 
@@ -1361,7 +1366,7 @@ def _handle_tavily_exhibition(args: dict) -> str:
 def _handle_keypool_status(args: dict) -> str:
     """号池运维视图: 各 provider key/配额/usage_log/代理。"""
     import sqlite3
-    from keypool import KeyPool, ProxyPool, KEYPOOL_DB
+    from keypool import KeyPool, ProxyPool, KEYPOOL_DB, DEFAULT_TENANT
 
     kp = KeyPool()
     st = kp.status()
@@ -1370,7 +1375,7 @@ def _handle_keypool_status(args: dict) -> str:
                 "Overpass 首次查询会自动 bootstrap 6 个公共端点; "
                 "投喂私有 key 在代码层 keypool.add(provider, api_key=...) 。")
 
-    lines = ["🔑 号池状态 (tenant=ear):"]
+    lines = [f"🔑 号池状态 (tenant={DEFAULT_TENANT}):"]
     for provider, info in st.items():
         total = info["total"]
         quota = f"{info['used']}/{total}" if total else f"{info['used']}/∞"
@@ -1480,7 +1485,7 @@ def _llm_filter_leads(leads: list, product_intent: str) -> tuple:
     # 限制批量大小 (LLM 上下文 + 延迟): 单批最多 25 条
     batch = leads[:25]
     base = _os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
-    model = _os.environ.get("DEEPSEEK_MODEL", "deepseek-chat").strip()
+    model = _os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash").strip()
     proxy = _os.environ.get("https_proxy") or _os.environ.get("HTTPS_PROXY") or _os.environ.get("http_proxy") or _os.environ.get("HTTP_PROXY") or None
 
     # 构造紧凑候选清单 (只给 LLM 判定所需的最少字段)
