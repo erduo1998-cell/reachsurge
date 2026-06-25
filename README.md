@@ -131,6 +131,8 @@ pip install -r requirements.txt
 playwright install chromium # 仅供 europages / customs_importyeti 抓取用
 ```
 
+> **可选 · gosom 经销商源二进制**：`search_customers` 默认会调 gosom 源（Google Maps 高质量经销商档案 + 官网邮箱），它依赖 [`gosom/google-maps-scraper`](https://github.com/gosom/google-maps-scraper) 项目提供的 `google_maps_scraper` 二进制（内嵌 playwright，首次运行自动下载 chromium）。该二进制**不随仓库分发**——需自行编译或下载，放到项目 `bin/google_maps_scraper`，或用环境变量 `GOSOM_BIN` 指向任意路径。未提供时 gosom 源会在 `search()` 报错并降级，其余源不受影响。
+
 ### 2. 配置环境变量
 
 在项目根目录建 `.env`（示例见 `.env.example`）：
@@ -179,10 +181,11 @@ python mcp_server.py
 | `SERPAPI_API_KEYS` | 否 | SerpApi Google Maps 经销商源，逗号分隔多 key | serpapi_maps 源不可用 |
 | `TAVILY_API_KEYS` | 否 | Tavily 展会展商搜索，逗号分隔多 key | 展会路由不可用 |
 | `CAPSOLVER_API_KEY` | 否 | europages 过 Cloudflare WAF | europages 源不可用（其他源不受影响） |
+| `GOSOM_BIN` | 否 | gosom `google_maps_scraper` 二进制路径，默认项目内 `bin/google_maps_scraper` | gosom 源不可用（其他源不受影响） |
 | `HTTPS_PROXY` / `HTTP_PROXY` | 否 | 出口代理 | 部分对出口 IP 敏感的源（社交、海关）可能失败 |
 | `LEADGEN_DATA_DIR` | 否 | SQLite 与知识库存储目录，默认 `data/` | 用默认值 |
 | `LEADGEN_ENV_FILE` | 否 | 额外的 `.env` 文件路径，启动时 `load_dotenv` 注入 | 不加载额外 env |
-| `LEADGEN_FERNET_KEY` | 否 | 凭证加密密钥（urlsafe base64） | 首次自动生成并写入固定路径 |
+| `LEADGEN_FERNET_KEY` | 否 | 凭证加密密钥（urlsafe base64） | 首次自动生成并写入 `LEADGEN_DATA_DIR`（默认项目 `data/`）下 `leadgen_fernet.key` |
 
 > SMTP / IMAP 的 `smtp_host` / `smtp_user` / `smtp_password` / `imap_host` 等不走环境变量，由 `save_user_config` 工具录入、加密落库。
 
@@ -194,7 +197,7 @@ python mcp_server.py
 |----|------|:----------:|----------------|
 | **SerpApi google_maps** | Google Maps 经销商档案（phone/website/type_ids） | 是 | 免费档每月有搜索额度，type_ids 天然映射 buyer_type |
 | **OpenStreetMap Overpass** | 本地经销商 / 批发商，原生带 email/website/phone | 否 | 公共端点，号池轮询 6 个端点避限流 |
-| **gosom Google Maps scraper** | Google Maps 经销商档案（内嵌 playwright） | 否 | 免 docker 二进制，邮箱命中率较高 |
+| **gosom Google Maps scraper** | Google Maps 经销商档案（内嵌 playwright） | 否 | 免 docker 二进制（需自备，见[快速开始](#1-克隆与装依赖)），邮箱命中率较高 |
 | **Hunter Discover** | 按域找公司 + 邮箱富集（domain-search） | 是 | Free 档 50 search/月，Discover 找公司不消耗 credits |
 | **Europages** | 欧洲最大 B2B 平台档案 | 否（需 CAPSOLVER） | playwright 过 Cloudflare WAF |
 | **Tavily** | 全网搜展会展商 + LLM 提取展商名单 | 是 | 免费档每月有搜索额度 |

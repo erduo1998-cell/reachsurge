@@ -2,7 +2,7 @@
 
 设计要点:
 - 全局 keypool.db (data/sqlite/keypool.db), 不走 per-user 库 —— 号池是跨租户共享资源
-  (dogfood 单租户 tenant_id='ear', 表结构预留多租户)。
+  (当前单租户, 表结构预留多租户)。
 - 复用 storage.db 的 Fernet 加密 api_key (_encrypt_field/_decrypt_field)。
 - 同步实现 (对齐现有 httpx/sqlite/handler 全同步风格): with pool.acquire('overpass') as k
 - 3 张表: api_key_pool / proxy_pool / usage_log (quotas 内化进 api_key_pool, 避免过度设计)。
@@ -25,7 +25,7 @@ from typing import Optional
 from storage.db import _encrypt_field, _decrypt_field, DATA_DIR
 
 KEYPOOL_DB = DATA_DIR / "keypool.db"
-DEFAULT_TENANT = "ear"  # dogfood 单租户; 产品化时多租户仍贯穿此字段
+DEFAULT_TENANT = "ear"  # 默认租户; 产品化时多租户仍贯穿此字段
 
 
 # ── 连接 & 建表 ──
@@ -352,7 +352,7 @@ class ProxyPool:
             c.close()
         if row:
             return row["proxy_url"]
-        # 回退: Clash 本地混合端口 (记忆 leadgen-wsl-proxy: WSL 经网关:7897)
+        # 回退: 标准代理环境变量 (https_proxy/HTTPS_PROXY/http_proxy/HTTP_PROXY/all_proxy)
         for k in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy"):
             v = os.environ.get(k, "").strip()
             if v:

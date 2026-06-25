@@ -169,7 +169,7 @@ def _llm_extract(answer: str, results: list, query: str) -> list:
         return _heuristic_extract(answer, results)
 
     base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash").strip()
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat").strip()
     proxy = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY") or None
     prompt = f"""从下面的展会搜索内容里, 提取所有出现的**公司名**(展商/参展商/品牌方/厂商), 输出 JSON。
 

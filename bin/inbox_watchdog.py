@@ -2,12 +2,13 @@
 """ReachSurge 邮箱 watchdog 逻辑（由 cron no-agent 的 .sh wrapper 调起）。
 
 用项目 venv 跑（MCP 客户端自身的 venv 没有 cryptography 等
-leadgen 依赖）。复用 mcp_server._handle_check_inbox 拉新邮件入库 inquiries。
+项目依赖）。复用 mcp_server._handle_check_inbox 拉新邮件入库 inquiries。
 有新回复 → stdout 输出摘要；无新/未配 IMAP/出错 → 静默。
 """
 import sys, os
-sys.path.insert(0, "/home/erduo/leadgen-pipeline")
-os.chdir("/home/erduo/leadgen-pipeline")
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+os.chdir(_ROOT)
 
 USER_ID = os.environ.get("REACHSURGE_USER_ID") or "REPLACE_WITH_YOUR_OPEN_ID"
 

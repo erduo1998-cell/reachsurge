@@ -22,14 +22,11 @@ CF 过法 (验证):
 """
 import os
 import re
-import subprocess
 import time
 import urllib.parse
 
 _UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
-_CHROMIUM_PATH = os.path.expanduser(
-    "~/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome")
 
 _STEALTH_JS = (
     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
@@ -41,21 +38,20 @@ _LED_HS_PREFIXES = ("9405", "8541", "8539")
 
 
 def _gateway_proxy() -> str:
-    """探测 WSL 网关:7897 (Clash Verge), 给 requests 用。无认证代理。"""
-    env_p = os.environ.get("LEADGEN_PROXY") or os.environ.get("HTTPS_PROXY") or ""
-    m = re.search(r"(\d+\.\d+\.\d+\.\d+:\d+)", env_p)
-    if m:
-        return f"http://{m.group(1)}"
-    try:
-        gw = subprocess.check_output(
-            "ip route | awk '/^default/{print $3}'",
-            shell=True, text=True,
-        ).strip()
-        if gw:
-            return f"http://{gw}:7897"
-    except Exception:
-        pass
-    return ""
+    """代理 URL (纯环境变量驱动): LEADGEN_PROXY > HTTPS_PROXY > HTTP_PROXY。
+
+    返回 http://host:port 形式; 无任何代理 env 则返回空串 (requests 直连)。
+    """
+    env_p = (os.environ.get("LEADGEN_PROXY")
+             or os.environ.get("HTTPS_PROXY")
+             or os.environ.get("HTTP_PROXY")
+             or "")
+    env_p = env_p.strip()
+    if not env_p:
+        return ""
+    if not env_p.startswith("http"):
+        env_p = f"http://{env_p}"
+    return env_p
 
 
 def _empty_result(error: str = "") -> dict:
@@ -283,7 +279,6 @@ def lookup(company_name: str, company_slug: str = None) -> dict:
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            executable_path=_CHROMIUM_PATH,
             args=["--no-sandbox", "--disable-dev-shm-usage",
                   "--disable-blink-features=AutomationControlled"],
             proxy={"server": proxy_url} if proxy_url else None,

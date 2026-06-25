@@ -14,7 +14,7 @@
 - enrich_lead_emails 批量补全线索邮箱（SMTP验证）
 
 运行方式:
-  cd ~/leadgen-pipeline && .venv/bin/python mcp_server.py
+  cd ~/reachsurge && .venv/bin/python mcp_server.py
 """
 
 import os
@@ -69,7 +69,7 @@ TOOLS = [
         inputSchema={
             "type": "object",
             "properties": {
-                "user_id": {"type": "string", "description": "用户 ID（兼容飞书等 MCP 客户端的 chat_id 或 open_id）"},
+                "user_id": {"type": "string", "description": "用户 ID（兼容各类 MCP 客户端的 chat_id 或 open_id）"},
                 "name": {"type": "string", "description": "用户称呼"},
                 "industry": {"type": "string", "description": "行业，如 LED灯具、机械配件"},
                 "target_markets": {"type": "string", "description": "目标市场，逗号分隔，如 '德国,美国,英国'"},
@@ -754,14 +754,16 @@ def _handle_check_inbox(args: dict) -> str:
         mail = imaplib.IMAP4_SSL(imap_host, imap_port)
         mail.login(imap_user, imap_password)
         mail.select("INBOX")
-        typ, data = mail.search(None, "ALL")
+        # 用 UID 而非 sequence number 去重：sequence 会随邮箱删信/清理移位，
+        # 同一封已处理邮件下次拿到新序号 → 不命中 seen → 重复入库。UID 恒定。
+        typ, data = mail.uid("search", None, "ALL")
         ids = data[0].split() if data and data[0] else []
         recent = ids[-(limit * 3):] if ids else []
-        for mid in recent:
-            uid_s = mid.decode() if isinstance(mid, bytes) else str(mid)
+        for uid in recent:
+            uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
             if uid_s in seen:
                 continue
-            typ, msg_data = mail.fetch(mid, "(RFC822)")
+            typ, msg_data = mail.uid("fetch", uid, "(RFC822)")
             if typ != "OK" or not msg_data or not msg_data[0]:
                 continue
             raw = msg_data[0][1]
@@ -815,7 +817,7 @@ def _handle_check_inbox(args: dict) -> str:
 
 def _handle_search_customers(args: dict) -> str:
     import os as _os, sys as _sys, uuid as _uuid
-    # 确保 ~/leadgen-pipeline 在 path (能 import registry)
+    # 确保 ~/reachsurge 在 path (能 import registry)
     _here = _os.path.dirname(_os.path.abspath(__file__))
     if _here not in _sys.path:
         _sys.path.insert(0, _here)
@@ -1478,7 +1480,7 @@ def _llm_filter_leads(leads: list, product_intent: str) -> tuple:
     # 限制批量大小 (LLM 上下文 + 延迟): 单批最多 25 条
     batch = leads[:25]
     base = _os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
-    model = _os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash").strip()
+    model = _os.environ.get("DEEPSEEK_MODEL", "deepseek-chat").strip()
     proxy = _os.environ.get("https_proxy") or _os.environ.get("HTTPS_PROXY") or _os.environ.get("http_proxy") or _os.environ.get("HTTP_PROXY") or None
 
     # 构造紧凑候选清单 (只给 LLM 判定所需的最少字段)

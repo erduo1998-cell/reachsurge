@@ -14,7 +14,7 @@ status 映射 (诚实, 不过度声称):
 
 配额守卫 (Free 50 search/月): __init__ 探一次 account.remaining; 用尽则整轮禁用。
 单次响应非 200 / 明显 quota 错误 → 即时禁用, 后续域直接跳过 (不烧配额)。
-Hunter 域搜索走 WSL 代理 (https_proxy=172.23.64.1:7897), httpx 显式传 proxy。
+Hunter 域搜索走 HTTPS_PROXY 等标准代理环境变量, httpx 显式传 proxy。
 """
 import os
 from typing import Optional

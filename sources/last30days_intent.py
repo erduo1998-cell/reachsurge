@@ -31,27 +31,16 @@ SOURCE_TAG = "intent"  # registry 里的 kind
 
 
 def _ensure_proxy():
-    """WSL2 经 Windows 主机的 Clash Verge 代理访问外网 (reddit/google/maps)。
+    """代理 URL (纯环境变量驱动): LEADGEN_PROXY > HTTPS_PROXY > HTTP_PROXY。
 
-    Clash Verge (verge-mihomo) 默认 mixed port 7897, 绑 0.0.0.0 允许局域网。
-    WSL2 通过默认网关 (Windows 主机 IP) 访问它。IP 随 WSL 重启变化, 故动态探测。
-    优先级: 环境变量 LEADGEN_PROXY > HTTPS_PROXY > 自动探测 gateway:7897。
+    无任何代理 env 返回 None; 取到则原样返回 (调用方再 setdefault 进 os.environ/config)。
     """
-    import subprocess
     existing = (os.environ.get("LEADGEN_PROXY")
                 or os.environ.get("HTTPS_PROXY")
-                or os.environ.get("https_proxy"))
-    if existing:
-        return existing
-    try:
-        out = subprocess.check_output(
-            ["ip", "route"], text=True, timeout=3, stderr=subprocess.DEVNULL)
-        for line in out.splitlines():
-            if line.startswith("default"):
-                return f"http://{line.split()[2]}:7897"
-    except Exception:
-        pass
-    return None
+                or os.environ.get("https_proxy")
+                or os.environ.get("HTTP_PROXY")
+                or os.environ.get("http_proxy"))
+    return existing.strip() if existing else None
 
 
 def search(query: str, country: str = "", max_results: int = 20,

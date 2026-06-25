@@ -8,7 +8,7 @@
   biography/full_name/follower_count 等。**完整性判断=提取到 follower_count 才算成功**,
   否则降级页重试(默认 5 次)。禁用 "description":"..." 假阳性 fallback(实测会吐 'intern site in general')。
 
-查询类工具,不进 SOURCE_REGISTRY,不入库。代理动态取 gateway:7897(WSL ip route default),
+查询类工具,不进 SOURCE_REGISTRY,不入库。代理走 LEADGEN_PROXY/HTTPS_PROXY 环境变量,无则直连,
 节点须美国(TikTok 对 HK 节点 302,/hk/about)。
 """
 import re
@@ -16,7 +16,6 @@ import os
 import json
 import time
 import random
-import subprocess
 
 import requests
 
@@ -40,25 +39,16 @@ UNIVERSAL_DATA_RE = re.compile(
 
 
 def _get_proxy():
-    """动态取 gateway:7897 代理。优先级 LEADGEN_PROXY > HTTPS_PROXY > ip route default:7897。
+    """代理 URL (纯环境变量驱动): LEADGEN_PROXY > HTTPS_PROXY > HTTP_PROXY。
 
-    代理探测范式:WSL 里 ip route 探 gateway IP,
-    拼成 http://<gateway>:7897 (Clash Verge 出口)。返回 requests 的 proxies dict。
+    无任何代理 env 返回 None; 取到则补 http:// 前缀并返回 requests 的 proxies dict。
     """
-    url = os.environ.get('LEADGEN_PROXY') or os.environ.get('HTTPS_PROXY')
+    url = (os.environ.get('LEADGEN_PROXY')
+           or os.environ.get('HTTPS_PROXY')
+           or os.environ.get('HTTP_PROXY'))
     if not url:
-        try:
-            out = subprocess.run(
-                ['ip', 'route'],
-                capture_output=True, text=True, timeout=5,
-            ).stdout
-            for line in out.splitlines():
-                if line.startswith('default via'):
-                    gw = line.split()[2]
-                    url = f'http://{gw}:7897'
-                    break
-        except Exception:
-            pass
+        return None
+    url = url.strip()
     if not url:
         return None
     if not url.startswith('http'):

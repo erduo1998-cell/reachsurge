@@ -1,6 +1,6 @@
 """SQLite 数据层 —— 每用户独立 db 文件，零锁争用。
 
-复用自 foreign-trade-leadgen/src/storage/db.py，路径调整为 leadgen-pipeline。
+复用自 foreign-trade-leadgen/src/storage/db.py，路径调整为 reachsurge。
 """
 import os
 import sys
@@ -15,6 +15,10 @@ _env_data_dir = os.environ.get("LEADGEN_DATA_DIR", "").strip()
 DATA_DIR = Path(_env_data_dir) if _env_data_dir else Path(__file__).parent.parent / "data" / "sqlite"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+# Fernet 密钥目录：与 DATA_DIR 同源(复用 LEADGEN_DATA_DIR)，env 模式直接用 env 值，
+# 否则落到项目根 data/ 目录。密钥文件 leadgen_fernet.key 与 sqlite 子目录并列。
+KEY_DIR = Path(_env_data_dir) if _env_data_dir else Path(__file__).parent.parent / "data"
+
 # Fernet 密文固定前缀，用于判定值是否已被加密
 _FERNET_CIPHER_PREFIX = "gAAAAA"
 
@@ -27,8 +31,8 @@ def _get_fernet() -> Fernet:
 
     密钥来源优先级：
       1. 环境变量 LEADGEN_FERNET_KEY（urlsafe base64 Fernet key）
-      2. 文件 /home/erduo/.hermes/leadgen_fernet.key：不存在则生成并写入（0600），
-         存在则读取。
+      2. 文件 <KEY_DIR>/leadgen_fernet.key（KEY_DIR 复用 LEADGEN_DATA_DIR，默认项目根 data/）：
+         不存在则生成并写入（0600），存在则读取。
     """
     global _fernet_cache
     if _fernet_cache is not None:
@@ -39,7 +43,7 @@ def _get_fernet() -> Fernet:
         _fernet_cache = Fernet(key_str.encode("utf-8"))
         return _fernet_cache
 
-    key_file = Path("/home/erduo/.hermes/leadgen_fernet.key")
+    key_file = KEY_DIR / "leadgen_fernet.key"
     key_file.parent.mkdir(parents=True, exist_ok=True)
     if key_file.exists():
         key_bytes = key_file.read_bytes().strip()

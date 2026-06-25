@@ -16,13 +16,13 @@ SOURCE_REGISTRY = {
     },
     "gosom_maps": {
         "module": gosom,
-        "enabled": True,    # 免docker二进制实测稳定 (43%邮箱命中)
+        "enabled": True,    # 免docker二进制实测稳定 (邮箱命中率经多轮验证)
         "weight": 1.2,      # 档案源信息更完整, 略加权
         "kind": "archive",
     },
     "europages": {
         "module": europages,
-        "enabled": True,    # playwright 过 WAF 实测稳定 (12s 拿 token)
+        "enabled": True,    # playwright 过 WAF 实测稳定 (token 获取经多轮验证)
         "weight": 1.1,      # 介于 intent(1.0) 和 gosom(1.2) 之间
         "kind": "archive",
     },

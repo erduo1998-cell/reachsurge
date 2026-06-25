@@ -2,12 +2,9 @@
 
 产出结构化公司档案 (company/website/email/phone 齐全) —— 外贸高质量 lead。
 
-免 docker: 用本地下载的二进制 (~/leadgen-pipeline/bin/google_maps_scraper),
-内嵌 playwright (chromium 自动下载到 ~/.cache/ms-playwright)。
-绕开 docker/WSL overlay2 只读风险 (早期教训)。
-
-gosom -email 会爬每个公司官网提取邮箱。代理走 Clash Verge gateway:7897
-(gosom -proxies 强制要 user:pass; Clash 局域网无认证 → 用 dummy u:p 骗过)。
+依赖 gosom 的 google_maps_scraper 二进制 (内嵌 playwright, 首次运行自动下载
+chromium)。该二进制不随仓库分发, 需自行下载放到项目 bin/google_maps_scraper,
+或用环境变量 GOSOM_BIN 指向任意路径。gosom -email 会爬每个公司官网提取邮箱。
 
 通用源 (增强):
 - _COUNTRY 表覆盖全球主要贸易国, 英文名/ISO2/ISO3/中文/本地名 → {lang, iso}
@@ -25,7 +22,14 @@ from .base import LeadCandidate
 
 ENABLED = True  # 免 docker 二进制已实测稳定
 
-BIN = os.path.expanduser("~/leadgen-pipeline/bin/google_maps_scraper")
+BIN = os.environ.get(
+    "GOSOM_BIN",
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "bin",
+        "google_maps_scraper",
+    ),
+)
 SOURCE_TAG = "archive"
 
 # ---------------------------------------------------------------------------
@@ -237,23 +241,20 @@ def _product_terms(query: str) -> list:
 
 
 def _proxy_arg() -> str:
-    """gosom -proxies 要 user:pass@host:port; Clash 7897 无认证 → dummy u:p。
+    """gosom -proxies 参数 (纯环境变量驱动): LEADGEN_PROXY > HTTPS_PROXY > HTTP_PROXY。
 
-    优先级: LEADGEN_PROXY > HTTPS_PROXY > 自动探测 WSL 网关:7897。
+    返回 http://host:port 形式; 无任何代理 env 则返回空串 (gosom 直连)。
     """
-    env_p = os.environ.get("LEADGEN_PROXY") or os.environ.get("HTTPS_PROXY") or ""
-    m = re.search(r"(\d+\.\d+\.\d+\.\d+:\d+|[\w.-]+:\d+)", env_p)
-    host = m.group(1) if m else None
-    if not host:
-        try:
-            gw = subprocess.check_output(
-                "ip route | awk '/^default/{print $3}'",
-                shell=True, text=True,
-            ).strip()
-            host = f"{gw}:7897" if gw else None
-        except Exception:
-            host = None
-    return f"http://u:p@{host}" if host else ""
+    env_p = (os.environ.get("LEADGEN_PROXY")
+             or os.environ.get("HTTPS_PROXY")
+             or os.environ.get("HTTP_PROXY")
+             or "")
+    env_p = env_p.strip()
+    if not env_p:
+        return ""
+    if not env_p.startswith("http"):
+        env_p = f"http://{env_p}"
+    return env_p
 
 
 def search(query: str, country: str = "", max_results: int = 20) -> list:
