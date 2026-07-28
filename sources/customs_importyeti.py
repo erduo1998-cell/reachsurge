@@ -28,6 +28,13 @@ import urllib.parse
 _UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
 
+# 启动时检测 playwright 可用性
+try:
+    from playwright.sync_api import sync_playwright  # noqa: F401
+    _PLAYWRIGHT_OK = True
+except ImportError:
+    _PLAYWRIGHT_OK = False
+
 _STEALTH_JS = (
     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
     "window.chrome = {runtime: {}, app: {}};"
@@ -267,7 +274,11 @@ def _parse_suppliers_cn(rows: list) -> list:
 
 def lookup(company_name: str, company_slug: str = None) -> dict:
     """查 ImportYeti 海关提单，返回该公司从中国进口的情况。"""
-    from playwright.sync_api import sync_playwright
+    if not _PLAYWRIGHT_OK:
+        return _empty_result(
+            "playwright/chromium 未安装。安装方法: pip install playwright && playwright install chromium。"
+            "缺失时不影响其他源 (gosom/OSM/Hunter/SerpApi 等)，仅本海关验真功能不可用。"
+        )
 
     company_name = (company_name or "").strip()
     slug = (company_slug or "").strip()

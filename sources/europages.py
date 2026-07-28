@@ -31,7 +31,12 @@ import time
 from .base import LeadCandidate
 from .gosom import _iso_for, _en_for_iso
 
-ENABLED = True
+# 启动时检测 playwright 可用性，不可用则静默降级（不影响其他源）
+try:
+    from playwright.sync_api import sync_playwright  # noqa: F401
+    ENABLED = True
+except ImportError:
+    ENABLED = False
 
 _HOME = "https://www.europages.co.uk/"
 # 这个 JSON API 已下线 (带 token 调返回 404), 但未带 token 时返回 405+puzzle,

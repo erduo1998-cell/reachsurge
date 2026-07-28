@@ -227,7 +227,7 @@ ReachSurge 通过单个 MCP 服务暴露以下工具（按类别分组）。
 | 项目 | 要求 |
 |------|------|
 | Python | 3.10 及以上 |
-| 操作系统 | **Mac / Windows 原生即可跑主流程**（搜索 + 富集 + 发信 + 收信全部正常）；但 `europages`、`customs_importyeti`、`gosom` 三个源在 Mac/Windows 上可能不兼容会降级。**Linux / WSL 全功能**，推荐用 WSL 跑生产。 |
+| 操作系统 | **Mac / Windows / Linux 全平台可跑主流程**（搜索 + 富集 + 发信 + 收信全部正常）；`europages` 和 `customs_importyeti` 装 playwright 后跨平台可用；`gosom` 源仅 Linux/WSL 可用（会自动降级）。 |
 | 依赖项 | 见 `requirements.txt`；可选的 playwright / gosom 见下方说明 |
 
 ### 1. 克隆与装依赖
@@ -343,8 +343,8 @@ pip install playwright
 playwright install chromium
 ```
 
-- **平台兼容性**：这两个源在 **Mac / Windows 原生环境可能不兼容**（europages 还要过 Cloudflare WAF，依赖 CAPSOLVER）。缺失 chromium 或平台不兼容时，对应源会降级跳过，不影响其他源。
-- **推荐环境**：要稳定用这两个源，建议在 **Linux / WSL** 下跑。
+- **平台兼容性**：跨平台兼容 **Linux / macOS / Windows**——启动时自动检测 playwright 是否安装及 chromium 路径，缺失时对应源静默降级，不影响其他源。
+- **europages 额外要求**：过 Cloudflare WAF 还需要 `CAPSOLVER_API_KEY` 或 `~/.capsolver_key`。
 - **不装会怎样**：主流程（搜经销商、富集邮箱、发信、收信）完全不受影响，只是少了欧洲 B2B 档案和美国海关提单验真这两条数据。
 
 ---
@@ -356,7 +356,7 @@ playwright install chromium
 | 现象 | 原因 | 解决 |
 |------|------|------|
 | **配了 key 但 LLM 还是在降级 / 没过滤** | MCP 子进程没加载到你的 `.env` | 在客户端配置的 `env` 段里加 `"LEADGEN_ENV_FILE": "/绝对路径/.env"`，或确认 `.env` 在项目根目录（会被自动加载）。重启客户端再试 |
-| **europages / customs 报 `executable doesn't exist`** | 没装 chromium，或当前平台不兼容 | 跑 `playwright install chromium`；Mac/Windows 上这俩源本来就可能不兼容，会自动降级，换 Linux/WSL 可解 |
+| **europages / customs 不可用** | 没装 playwright / chromium | 跑 `pip install playwright && playwright install chromium`；不装也不影响搜经销商等主流程，这俩源会自动降级 |
 | **gosom 源报「二进制不存在」** | 没下载 `google_maps_scraper` 二进制 | 要么按[这里](#gosom-二进制可选高质量邮箱源)装好并设 `GOSOM_BIN`；要么直接忽略（会降级到其他地图源） |
 | **代理连不上 / 请求超时** | 代理配错或没开 | 检查 `LEADGEN_PROXY`（优先级最高，专给 europages/gosom/customs/scout 用）或 `HTTPS_PROXY` 是否指向能用的代理；不需要代理就留空走直连 |
 | **`save_user_config` 报权限错误 / 写库失败** | 数据目录不可写 | 检查 `LEADGEN_DATA_DIR` 指向的路径是否存在、当前用户有无写权限；留空则用项目下 `data/`，确保项目目录可写 |
