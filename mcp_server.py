@@ -67,6 +67,12 @@ from security import (
     storage_token,
     validate_public_host,
 )
+from onboarding import (
+    complete_setup,
+    is_setup_complete,
+    server_instructions,
+    setup_status,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("leadgen-mcp")
@@ -84,7 +90,7 @@ class _SecretRedactionFilter(logging.Filter):
 for _handler in logging.getLogger().handlers:
     _handler.addFilter(_SecretRedactionFilter())
 
-server = Server("reachsurge")
+server = Server("reachsurge", instructions=server_instructions())
 _TASK_GUARD = threading.Lock()
 _ACTIVE_TASKS: dict[str, int] = {}
 
@@ -110,6 +116,34 @@ def _release_task_slot(user_id: str):
 # ── Tool definitions ──
 
 TOOLS = [
+    Tool(
+        name="setup_status",
+        description=(
+            "首次连接必须先调用：检查本地首次运行状态、待补业务资料和可选能力。"
+            "只返回是否已配置，绝不读取或回显 API Key、Token、邮箱密码或 .env 内容。"
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "用户 ID"},
+            },
+            "required": ["user_id"],
+        },
+    ),
+    Tool(
+        name="complete_setup",
+        description=(
+            "完成首次设置：复核本地资料和安全条件，写入无秘密完成标记，"
+            "并自动删除临时首次运行文件。零 API Key 也可以完成。"
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "用户 ID"},
+            },
+            "required": ["user_id"],
+        },
+    ),
     Tool(
         name="save_user_config",
         description="录入或更新用户的产品信息和目标市场。邮箱凭证不能通过工具提交，只能由本机所有者写入 .env。",
@@ -448,6 +482,7 @@ _READ_ONLY_TOOLS = {
     "compose_outreach", "importyeti_lookup", "social_profile_lookup",
     "get_task_status", "keypool_status",
 }
+_IDEMPOTENT_TOOLS = _READ_ONLY_TOOLS | {"setup_status", "complete_setup"}
 _OPEN_WORLD_TOOLS = {
     "verify_email", "send_email", "check_inbox", "search_customers",
     "enrich_lead_emails", "importyeti_lookup", "social_profile_lookup",
@@ -457,7 +492,7 @@ for _tool in TOOLS:
     _tool.annotations = ToolAnnotations(
         readOnlyHint=_tool.name in _READ_ONLY_TOOLS,
         destructiveHint=_tool.name == "send_email",
-        idempotentHint=_tool.name in _READ_ONLY_TOOLS,
+        idempotentHint=_tool.name in _IDEMPOTENT_TOOLS,
         openWorldHint=_tool.name in _OPEN_WORLD_TOOLS,
     )
 
@@ -490,7 +525,22 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent] | CallToolR
         # Values can contain passwords, API keys, email bodies and customer PII.
         # Log only the shape of the call, never its payload.
         logger.info("Tool called: %s, argument_keys=%s", name, sorted(arguments))
-        if name == "save_user_config":
+        user_id = arguments.get("user_id", DEFAULT_USER_ID)
+        setup_tools = {"setup_status", "save_user_config", "get_user_config", "complete_setup"}
+        if name not in setup_tools and not is_setup_complete(user_id):
+            return CallToolResult(
+                content=[TextContent(
+                    type="text",
+                    text="SETUP_REQUIRED: 请先调用 setup_status，并按返回步骤完成首次设置。",
+                )],
+                isError=True,
+            )
+
+        if name == "setup_status":
+            result = json.dumps(setup_status(user_id), ensure_ascii=False, indent=2)
+        elif name == "complete_setup":
+            result = json.dumps(complete_setup(user_id), ensure_ascii=False, indent=2)
+        elif name == "save_user_config":
             result = _handle_save_user_config(arguments)
         elif name == "get_user_config":
             result = _handle_get_user_config(arguments)
@@ -551,19 +601,22 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent] | CallToolR
 
 def _handle_save_user_config(args: dict) -> str:
     user_id = args["user_id"]
-    markets = [m.strip() for m in args.get("target_markets", "").split(",") if m.strip()] if args.get("target_markets") else []
 
     # Preserve previously stored values when a later call updates only product
     # information.  This also keeps legacy encrypted credentials from being
     # erased; new users should provide mail secrets via environment variables.
     existing = get_user_config(user_id) or {}
+    if "target_markets" in args:
+        markets = [m.strip() for m in args["target_markets"].split(",") if m.strip()]
+    else:
+        markets = existing.get("target_markets", []) or []
     config = {
         "user_id": user_id,
         "feishu_open_id": user_id,
-        "name": args.get("name", ""),
-        "industry": args.get("industry", ""),
+        "name": args.get("name", existing.get("name", "")),
+        "industry": args.get("industry", existing.get("industry", "")),
         "target_markets": markets,
-        "product_description": args.get("product_description", ""),
+        "product_description": args.get("product_description", existing.get("product_description", "")),
         "smtp_host": existing.get("smtp_host", ""),
         "smtp_port": existing.get("smtp_port", 587),
         "smtp_user": existing.get("smtp_user", ""),

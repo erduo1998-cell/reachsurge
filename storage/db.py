@@ -339,6 +339,30 @@ def get_user_config(user_id: str) -> Optional[dict]:
     return d
 
 
+def get_user_profile(user_id: str) -> Optional[dict]:
+    """Read only non-secret business fields for onboarding and status checks."""
+    db_path = _get_db_path(user_id)
+    if not db_path.exists():
+        return None
+    conn = _get_conn(user_id)
+    row = conn.execute(
+        """
+        SELECT name, industry, target_markets, product_description, daily_send_limit
+        FROM user_config WHERE user_id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    profile = dict(row)
+    try:
+        profile["target_markets"] = json.loads(profile.get("target_markets", "[]"))
+    except (json.JSONDecodeError, TypeError):
+        profile["target_markets"] = []
+    return profile
+
+
 def user_exists(user_id: str) -> bool:
     """检查用户是否已录入过信息。"""
     db_path = _get_db_path(user_id)

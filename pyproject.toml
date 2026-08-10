@@ -51,7 +51,11 @@ Repository = "https://github.com/erduo1998-cell/reachsurge"
 Issues = "https://github.com/erduo1998-cell/reachsurge/issues"
 
 [tool.setuptools]
-py-modules = ["mcp_server", "registry", "keypool", "security"]
+py-modules = ["mcp_server", "onboarding", "registry", "keypool", "security"]
+
+[tool.setuptools.data-files]
+"share/reachsurge" = [".env.example"]
+"share/reachsurge/docs" = ["docs/*.md"]
 
 [tool.setuptools.packages.find]
 include = ["sources*", "storage*", "tools*"]

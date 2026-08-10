@@ -14,8 +14,9 @@ def _tool(name):
 
 def test_tool_names_are_unique_and_complete():
     names = [tool.name for tool in mcp_server.TOOLS]
-    assert len(names) == 20
+    assert len(names) == 22
     assert len(names) == len(set(names))
+    assert names[:2] == ["setup_status", "complete_setup"]
 
 
 def test_all_schemas_are_closed_and_user_id_is_optional():
@@ -85,6 +86,42 @@ def test_server_side_validation_rejects_bad_values_and_extra_fields():
 def test_tool_errors_use_standard_mcp_error_flag():
     result = asyncio.run(mcp_server.call_tool("list_leads", {"limit": 0}))
     assert result.isError is True
+
+
+def test_business_tools_are_gated_until_setup_is_complete(monkeypatch):
+    monkeypatch.setattr(mcp_server, "is_setup_complete", lambda user_id: False)
+    result = asyncio.run(mcp_server.call_tool("list_leads", {}))
+    assert result.isError is True
+    assert result.content[0].text.startswith("SETUP_REQUIRED:")
+
+
+def test_setup_tools_are_available_before_completion(monkeypatch):
+    monkeypatch.setattr(mcp_server, "is_setup_complete", lambda user_id: False)
+    monkeypatch.setattr(mcp_server, "setup_status", lambda user_id: {
+        "phase": "needs_profile", "onboarding_complete": False
+    })
+    result = asyncio.run(mcp_server.call_tool("setup_status", {}))
+    assert result[0].text.startswith("{")
+    assert '"phase": "needs_profile"' in result[0].text
+
+
+def test_partial_profile_update_preserves_existing_values(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(mcp_server, "get_user_config", lambda user_id: {
+        "name": "耳总",
+        "industry": "LED",
+        "target_markets": ["德国"],
+        "product_description": "旧描述",
+        "daily_send_limit": 30,
+    })
+    monkeypatch.setattr(mcp_server, "upsert_user_config", lambda config: saved.update(config))
+    mcp_server._handle_save_user_config({
+        "user_id": "default", "product_description": "新描述"
+    })
+    assert saved["name"] == "耳总"
+    assert saved["industry"] == "LED"
+    assert saved["target_markets"] == ["德国"]
+    assert saved["product_description"] == "新描述"
 
 
 def test_model_selected_user_id_is_ignored_by_default(monkeypatch):

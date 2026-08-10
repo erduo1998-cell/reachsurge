@@ -46,12 +46,13 @@ ReachSurge 不绑定 Claude，也不绑定某个大模型。它使用标准 MCP 
 小白只需要记住这条主线：
 
 1. **安装并接入 AI 客户端**：先让 Codex、WorkBuddy、Claude 或 Cursor 能看到 ReachSurge 的工具。
-2. **保存一条测试线索**：不填 API Key、不访问付费服务，先确认本地 MCP 和数据库工作正常。
-3. **按需开启搜索源**：在 `.env` 中填写你已有的 Key；没有 Key 的来源会自动跳过。
-4. **让 AI 搜索企业**：长时间搜索会立即返回 `task_id`，AI 再通过 `get_task_status` 查询进度和结果。
-5. **补全、验证并管理线索**：公开邮箱、企业信息和状态统一保存在你的本地数据目录。
-6. **生成开发信草稿**：ReachSurge 提供公司和产品上下文，由宿主 AI 写成草稿，不会自动发送。
-7. **人工确认后才发送**：真发信默认关闭；只有本机开启开关，并且每次明确确认后，`send_email` 才会执行。
+2. **由 Agent 完成首次向导**：调用 `setup_status`，只填写产品、行业和目标市场等非秘密信息。
+3. **保存一条测试线索**：不填 API Key、不访问付费服务，先确认本地 MCP 和数据库工作正常。
+4. **按需开启搜索源**：在 `.env` 中填写你已有的 Key；没有 Key 的来源会自动跳过。
+5. **让 AI 搜索企业**：长时间搜索会立即返回 `task_id`，AI 再通过 `get_task_status` 查询进度和结果。
+6. **补全、验证并管理线索**：公开邮箱、企业信息和状态统一保存在你的本地数据目录。
+7. **生成开发信草稿**：ReachSurge 提供公司和产品上下文，由宿主 AI 写成草稿，不会自动发送。
+8. **人工确认后才发送**：真发信默认关闭；只有本机开启开关，并且每次明确确认后，`send_email` 才会执行。
 
 ## 零 Key 快速开始
 
@@ -104,7 +105,7 @@ copy .env.example .env
 .\.venv\Scripts\python.exe -c "from mcp_server import TOOLS; print(f'ReachSurge OK: {len(TOOLS)} tools')"
 ```
 
-看到 `ReachSurge OK: 20 tools` 说明代码和依赖已正常安装。
+看到 `ReachSurge OK: 22 tools` 说明代码和依赖已正常安装。
 
 ### 3. 接到你的 AI 客户端
 
@@ -199,7 +200,17 @@ Windows JSON 中推荐使用 `/`，例如：
 
 WorkBuddy 可在「插件 → MCP 服务器 → 配置 MCP」粘贴；Claude Desktop 和 Cursor 在各自 MCP 设置中使用相同的 `command` / `env` 结构。保存后请完全退出并重启客户端。
 
-### 4. 做第一次安全测试
+### 4. 让 Agent 完成首次运行向导
+
+在客户端中发送：
+
+> 请先调用 ReachSurge 的 `setup_status`，按返回结果一步步带我完成首次设置。不要让我在聊天中粘贴任何 API Key、Token、邮箱密码、Cookie 或 `.env` 内容。
+
+Agent 会询问你的产品/行业、产品描述和目标市场。所有 API Key 都是可选能力，**零 Key 也可以完成**。资料齐全后，Agent 调用 `complete_setup`；ReachSurge 会自动删除临时首次运行文件，并在以后启动时跳过向导。
+
+服务端会拦住尚未完成设置的业务工具并返回 `SETUP_REQUIRED`，因此不依赖某个特定 Agent 是否读懂 README。注册和 Key 获取步骤见 [首次运行向导](docs/FIRST_RUN_GUIDE.zh-CN.md)。
+
+### 5. 做第一次安全测试
 
 在客户端中发送：
 
@@ -348,10 +359,12 @@ reachsurge-data/
 
 旧版本若已经把数据库直接放在 `LEADGEN_DATA_DIR` 根目录，代码会检测并继续使用旧布局，避免升级后看不到原数据。
 
-## 20 个工具
+## 22 个工具
 
 | 类别 | 工具 | 行为与风险 |
 |---|---|---|
+| 首次运行 | `setup_status` | 首个工具；只检查本地状态和能力是否配置，不回显秘密 |
+| 首次运行 | `complete_setup` | 复核后写无秘密完成标记，并删除临时向导文件 |
 | 配置 | `save_user_config` | 保存产品、市场和每日限额；不能写邮件凭证 |
 | 配置 | `get_user_config` | 读取当前本地配置，不回显密码 |
 | 知识库 | `add_knowledge` | 写本地产品资料 |
@@ -431,12 +444,14 @@ reachsurge-data/
 ```text
 reachsurge/
 ├── mcp_server.py          # MCP 工具 schema、路由与 stdio 入口
+├── onboarding.py          # 跨客户端首次运行状态机与无秘密完成标记
 ├── security.py            # 参数、脱敏、命名空间与外连安全检查
 ├── registry.py            # 多源归一化、去重和排序
 ├── keypool.py             # 加密 Key/代理池与配额
 ├── sources/               # 数据源和邮箱富集适配器
 ├── storage/               # SQLite 与本地知识库
 ├── tools/                 # 邮箱验证等工具
+├── docs/                  # 首次运行、GoSOM 等小白与 Agent 指南
 ├── tests/                 # 自动化验收
 └── .env.example           # 空值安全模板
 ```
