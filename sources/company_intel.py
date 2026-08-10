@@ -22,6 +22,7 @@ DeepSeek 调用走 OpenAI 兼容 API:
 import os
 import re
 import json
+import logging
 from urllib.parse import urlparse, urljoin
 
 import httpx
@@ -29,6 +30,7 @@ import sys
 
 # 直接跑本文件时确保 storage.* 可达 (gateway 内由 mcp_server 已 insert 项目根)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from security import redact_text, validate_public_http_url
 
 # ── DeepSeek 配置 (从 env 读, mcp_server.py 启动时 load_dotenv 已注入) ──
 _DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
@@ -65,10 +67,13 @@ _BAD_TAGS = ('script', 'style', 'noscript', 'nav', 'header', 'footer',
              'aside', 'svg', 'form', 'button', 'iframe')
 
 _VALID_LEVELS = ("high", "medium", "low", "none")
+_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+logger = logging.getLogger("reachsurge-company-intel")
 
 
 def _log(*a):
-    print("[company_intel]", *a, flush=True)
+    # stdout is the MCP stdio protocol channel; diagnostics must use stderr.
+    logger.info("%s", " ".join(redact_text(item) for item in a))
 
 
 # ── 抓取与正文提取 ──
@@ -83,17 +88,39 @@ def _normalize_origin(website: str) -> str:
     p = urlparse(s)
     if not p.netloc:
         return ""
-    return f"{p.scheme}://{p.netloc}"
+    origin = f"{p.scheme}://{p.netloc}"
+    try:
+        return validate_public_http_url(origin)
+    except ValueError:
+        return ""
 
 
 def _fetch(client: httpx.Client, url: str) -> str:
     """GET 一个 URL, 返回去 BOM 的文本或空串。失败静默(上层跳过)。"""
     try:
-        r = client.get(url)
-        if r.status_code >= 400:
-            return ""
-        # httpx 默认按 charset 解码; 兜底 utf-8
-        return r.text
+        current = url
+        for _ in range(6):
+            validate_public_http_url(current)
+            with client.stream("GET", current) as r:
+                if r.status_code in (301, 302, 303, 307, 308):
+                    target = r.headers.get("location", "")
+                    if not target:
+                        return ""
+                    current = urljoin(current, target)
+                    continue
+                if r.status_code >= 400:
+                    return ""
+                declared = int(r.headers.get("content-length", "0") or 0)
+                if declared > _MAX_RESPONSE_BYTES:
+                    return ""
+                body = bytearray()
+                for chunk in r.iter_bytes():
+                    body.extend(chunk)
+                    if len(body) > _MAX_RESPONSE_BYTES:
+                        return ""
+                encoding = r.encoding or "utf-8"
+                return bytes(body).decode(encoding, errors="replace")
+        return ""
     except Exception:
         return ""
 
@@ -165,7 +192,7 @@ def _gather_intel_text(website: str):
     with httpx.Client(
         timeout=httpx.Timeout(_FETCH_TIMEOUT, connect=5.0),
         headers={"User-Agent": _UA, "Accept-Language": "en,de;q=0.8"},
-        follow_redirects=True,
+        follow_redirects=False,
     ) as c:
         root_html = _fetch(c, base)
         if not root_html:

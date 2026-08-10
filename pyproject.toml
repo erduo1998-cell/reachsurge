@@ -17,6 +17,8 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -26,14 +28,22 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp>=1.0",
-    "httpx>=0.27",
-    "requests>=2.31",
-    "dnspython>=2.4",
-    "cryptography>=42.0",
-    "python-dotenv>=1.0",
-    "playwright>=1.40",
+    "mcp>=1.29,<2",
+    "httpx>=0.27,<1",
+    "requests>=2.31,<3",
+    "dnspython>=2.4,<3",
+    "cryptography>=50,<51",
+    "python-dotenv>=1,<2",
+    "platformdirs>=4,<5",
+    "jsonschema>=4.23,<5",
 ]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.40,<2"]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+reachsurge-mcp = "mcp_server:run"
 
 [project.urls]
 Homepage = "https://github.com/erduo1998-cell/reachsurge"
@@ -41,8 +51,9 @@ Repository = "https://github.com/erduo1998-cell/reachsurge"
 Issues = "https://github.com/erduo1998-cell/reachsurge/issues"
 
 [tool.setuptools]
-py-modules = ["mcp_server", "registry", "keypool"]
+py-modules = ["mcp_server", "registry", "keypool", "security"]
 
 [tool.setuptools.packages.find]
 include = ["sources*", "storage*", "tools*"]
 exclude = ["data*", "last30days*"]
+namespaces = false

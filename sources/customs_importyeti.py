@@ -290,7 +290,7 @@ def lookup(company_name: str, company_slug: str = None) -> dict:
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage",
+            args=["--disable-dev-shm-usage",
                   "--disable-blink-features=AutomationControlled"],
             proxy={"server": proxy_url} if proxy_url else None,
         )

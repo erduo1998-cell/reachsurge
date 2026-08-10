@@ -185,7 +185,7 @@ def get_waf_cookies(timeout_sec: int = 120) -> dict:
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            args=["--disable-dev-shm-usage"],
             proxy={"server": proxy_url} if proxy_url else None)
         context = browser.new_context(
             user_agent=_UA, viewport={"width": 1366, "height": 900})

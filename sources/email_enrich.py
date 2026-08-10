@@ -26,9 +26,15 @@ import re
 import time
 import smtplib
 import socket
+import ipaddress
 import urllib.request
 import urllib.error
+import os
 from urllib.parse import urlparse, urljoin
+
+# 支持从任意工作目录直接运行/导入本文件。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from security import validate_public_http_url
 
 import dns.resolver
 import dns.exception
@@ -100,6 +106,7 @@ _CONTACT_LINK_KEYWORDS = ('contact', 'kontakt', 'impressum', 'contato', 'contact
 SCRAPE_TIMEOUT = 6   # 单页超时(秒)
 SCRAPE_USER_AGENT = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                      '(KHTML, like Gecko) Chrome/124.0 Safari/537.36')
+MAX_SCRAPE_BYTES = 2 * 1024 * 1024
 
 
 def _log(*a):
@@ -170,7 +177,8 @@ def _resolve_ipv4(host):
     try:
         infos = socket.getaddrinfo(host, 25, socket.AF_INET, socket.SOCK_STREAM)
         for fam, typ, proto, canon, sa in infos:
-            return sa[0]  # IPv4 string
+            if ipaddress.ip_address(sa[0]).is_global:
+                return sa[0]  # IPv4 string
     except socket.gaierror:
         return None
     return None
@@ -279,13 +287,25 @@ def _website_is_useful(website):
 
 
 def _fetch_url(url, timeout=SCRAPE_TIMEOUT):
-    """stdlib urllib GET，返回 HTML 文本或 None。urllib 默认跟随重定向。"""
-    req = urllib.request.Request(url, headers={'User-Agent': SCRAPE_USER_AGENT})
+    """Fetch public HTML with redirect and response-size guards."""
+    class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            validate_public_http_url(newurl)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        validate_public_http_url(url)
+        req = urllib.request.Request(url, headers={'User-Agent': SCRAPE_USER_AGENT})
+        opener = urllib.request.build_opener(_SafeRedirectHandler())
+        with opener.open(req, timeout=timeout) as resp:
             if getattr(resp, 'status', 200) != 200 and getattr(resp, 'code', 200) != 200:
                 return None
-            data = resp.read()
+            declared = int(resp.headers.get('Content-Length', '0') or 0)
+            if declared > MAX_SCRAPE_BYTES:
+                return None
+            data = resp.read(MAX_SCRAPE_BYTES + 1)
+            if len(data) > MAX_SCRAPE_BYTES:
+                return None
             # 多数欧洲站点 utf-8；容错降级
             try:
                 return data.decode('utf-8', errors='replace')

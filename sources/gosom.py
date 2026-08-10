@@ -258,16 +258,17 @@ def _proxy_arg() -> str:
 
 
 def search(query: str, country: str = "", max_results: int = 20) -> list:
-    """跑本地 gosom 二进制, 解析 JSONL r.json → LeadCandidate (公司档案+邮箱)。
-
-    通用源: 不写死品类/国家。去噪只降分, 绝不删行 (防误杀真客户)。
-    """
+    """Run gosom in a private temporary directory that is always removed."""
     if not ENABLED:
         return []
     if not os.path.exists(BIN):
         raise RuntimeError(f"gosom 二进制不存在: {BIN}")
+    with tempfile.TemporaryDirectory(prefix="gosom_") as work:
+        return _search_in_workdir(query, country, max_results, work)
 
-    work = tempfile.mkdtemp(prefix="gosom_")
+
+def _search_in_workdir(query: str, country: str, max_results: int, work: str) -> list:
+    """Parse gosom JSONL inside a caller-owned temporary directory."""
     qfile = os.path.join(work, "queries.txt")
     with open(qfile, "w") as f:
         # gosom 接受自然语言查询; 地域塞进查询更精准

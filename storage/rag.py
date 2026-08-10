@@ -2,18 +2,42 @@
 
 后期可升级为 ChromaDB + bge-m3 向量检索。
 """
+import os
 import json
 import uuid
 from pathlib import Path
 
-KNOWLEDGE_DIR = Path(__file__).parent.parent / "data" / "knowledge"
+from platformdirs import user_data_path
+from security import storage_token
+
+_env_data_dir = os.environ.get("LEADGEN_DATA_DIR", "").strip()
+_legacy_project_data = Path(__file__).parent.parent / "data"
+_legacy_project_has_data = (
+    (_legacy_project_data / "leadgen_fernet.key").exists()
+    or (_legacy_project_data / "sqlite" / "keypool.db").exists()
+    or any((_legacy_project_data / "sqlite").glob("user_*.db"))
+    or ((_legacy_project_data / "knowledge").exists() and any((_legacy_project_data / "knowledge").iterdir()))
+)
+_base_data_dir = (
+    Path(_env_data_dir)
+    if _env_data_dir
+    else (_legacy_project_data if _legacy_project_has_data else user_data_path("ReachSurge", "erduo"))
+)
+KNOWLEDGE_DIR = _base_data_dir / "knowledge"
 KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    KNOWLEDGE_DIR.chmod(0o700)
+except OSError:
+    pass
 
 
 def _user_dir(user_id: str) -> Path:
-    safe_id = user_id.replace("/", "_").replace("\\", "_").replace(":", "_")
-    d = KNOWLEDGE_DIR / safe_id
+    d = KNOWLEDGE_DIR / storage_token(user_id)
     d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.chmod(0o700)
+    except OSError:
+        pass
     return d
 
 
@@ -39,9 +63,14 @@ def add_knowledge(
             "content": text,
             "metadata": meta,
         }
-        _doc_path(user_id, doc_id).write_text(
+        path = _doc_path(user_id, doc_id)
+        path.write_text(
             json.dumps(record, ensure_ascii=False), encoding="utf-8"
         )
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
 
     return ids
 

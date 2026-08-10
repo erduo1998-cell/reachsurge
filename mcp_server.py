@@ -1,8 +1,8 @@
 """
-获客管线 MCP Server — 兼容 Hermes 等 MCP 客户端 / agent 框架的外贸获客工具。
+ReachSurge MCP Server — 供支持本地 stdio 的 MCP 客户端使用。
 
 工具列表:
-- save_user_config   录入产品/市场/邮箱配置
+- save_user_config   录入产品与目标市场配置
 - get_user_config    查询用户配置
 - add_knowledge      添加产品知识到知识库
 - search_knowledge   检索产品知识
@@ -24,8 +24,8 @@ import uuid
 import asyncio
 import logging
 import threading
-import traceback
 from datetime import datetime
+from jsonschema import ValidationError, validate as validate_json_schema
 
 # 确保项目根在 sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -48,29 +48,71 @@ except Exception:
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import CallToolResult, Tool, ToolAnnotations, TextContent
 
 from storage.db import (
-    init_db, upsert_user_config, get_user_config, user_exists,
+    upsert_user_config, get_user_config,
     insert_lead, list_leads, update_lead_status, lead_exists, DATA_DIR,
-    create_task, set_task_running, set_task_progress, complete_task,
-    fail_task, get_task, count_pending_leads, get_lead, update_lead_intel,
-    insert_outreach_record, insert_inquiry, list_inquiries,
+    create_task, set_task_running, complete_task,
+    fail_task, get_task, count_pending_leads,
+    insert_outreach_record, insert_inquiry,
+    reserve_outreach_send, finish_outreach_send,
 )
 from storage.rag import add_knowledge, search_knowledge, get_knowledge_count
 from tools.email_verify import verify_email_smtp
+from security import (
+    DEFAULT_USER_ID,
+    mcp_user_id,
+    redact_text,
+    storage_token,
+    validate_public_host,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("leadgen-mcp")
 
-server = Server("leadgen")
+
+class _SecretRedactionFilter(logging.Filter):
+    """Ensure dependency errors cannot print known credentials to stderr logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact_text(record.getMessage())
+        record.args = ()
+        return True
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_SecretRedactionFilter())
+
+server = Server("reachsurge")
+_TASK_GUARD = threading.Lock()
+_ACTIVE_TASKS: dict[str, int] = {}
+
+
+def _reserve_task_slot(user_id: str) -> bool:
+    maximum = max(1, min(8, int(os.environ.get("REACHSURGE_MAX_ACTIVE_TASKS", "2") or 2)))
+    with _TASK_GUARD:
+        current = _ACTIVE_TASKS.get(user_id, 0)
+        if current >= maximum:
+            return False
+        _ACTIVE_TASKS[user_id] = current + 1
+        return True
+
+
+def _release_task_slot(user_id: str):
+    with _TASK_GUARD:
+        remaining = _ACTIVE_TASKS.get(user_id, 1) - 1
+        if remaining > 0:
+            _ACTIVE_TASKS[user_id] = remaining
+        else:
+            _ACTIVE_TASKS.pop(user_id, None)
 
 # ── Tool definitions ──
 
 TOOLS = [
     Tool(
         name="save_user_config",
-        description="录入或更新用户的产品信息、目标市场和邮箱配置。当用户告诉你他做什么产品、目标市场、邮箱信息时调用。",
+        description="录入或更新用户的产品信息和目标市场。邮箱凭证不能通过工具提交，只能由本机所有者写入 .env。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -79,14 +121,7 @@ TOOLS = [
                 "industry": {"type": "string", "description": "行业，如 LED灯具、机械配件"},
                 "target_markets": {"type": "string", "description": "目标市场，逗号分隔，如 '德国,美国,英国'"},
                 "product_description": {"type": "string", "description": "产品描述"},
-                "smtp_host": {"type": "string", "description": "SMTP 服务器地址（可选）"},
-                "smtp_port": {"type": "integer", "description": "SMTP 端口，默认 587"},
-                "smtp_user": {"type": "string", "description": "SMTP 用户名/邮箱"},
-                "smtp_password": {"type": "string", "description": "SMTP 密码"},
-                "imap_host": {"type": "string", "description": "IMAP 服务器地址（可选）"},
-                "imap_user": {"type": "string", "description": "IMAP 用户名/邮箱"},
-                "imap_password": {"type": "string", "description": "IMAP 密码"},
-                "daily_send_limit": {"type": "integer", "description": "每日发送上限，默认 30"},
+                "daily_send_limit": {"type": "integer", "description": "客户端偏好的每日发送上限；服务端 .env 硬上限优先", "minimum": 1, "maximum": 500},
             },
             "required": ["user_id"],
         },
@@ -210,7 +245,7 @@ TOOLS = [
     ),
     Tool(
         name="send_email",
-        description="【真发信工具】通过用户已配置的 SMTP 账号真实发送一封开发信给客户。这是唯一合法的发信途径,禁止用 execute_code 自己写 smtplib 脚本。发送成功后自动:①记录到 outreach_records(status=sent) ②若有 lead_id 把线索标记为 contacted。失败也会记录(status=failed+error)。调用前用户必须已用 save_user_config 配好 SMTP。",
+        description="【真发信工具】用本机所有者在 .env 配置的 SMTP 账号真实发送邮件。默认关闭，且每次都要求用户确认；模型不能提交或修改邮箱凭证。发送成功后记录结果，并可把关联线索标记为 contacted。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -219,13 +254,14 @@ TOOLS = [
                 "subject": {"type": "string", "description": "邮件主题"},
                 "body": {"type": "string", "description": "邮件正文（纯文本）"},
                 "lead_id": {"type": "string", "description": "关联线索 ID（可选，传则发信成功后自动标记该线索 contacted）"},
+                "confirm_send": {"type": "boolean", "description": "用户已明确确认本次真实发送时必须为 true"},
             },
-            "required": ["user_id", "to_email", "subject", "body"],
+            "required": ["to_email", "subject", "body", "confirm_send"],
         },
     ),
     Tool(
         name="check_inbox",
-        description="【收信工具】通过用户已配置的 IMAP 账号拉取最新收到的邮件,入库到 inquiries 表,用于发现客户回复。自动按 IMAP UID 去重(不重复入库)。调用前用户必须已用 save_user_config 配好 IMAP。用户说'看谁回复了/查收件箱/有没有新邮件'时调用。",
+        description="【收信工具】用本机所有者在 .env 配置的 IMAP 账号拉取邮件，将发件人、主题和正文摘录写入本地 inquiries 表，并按 UID 去重。默认关闭；模型不能提交或修改邮箱凭证。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -287,12 +323,12 @@ TOOLS = [
     ),
     Tool(
         name="get_task_status",
-        description="查询异步任务(如邮箱补充 enrich_lead_emails)的进度和结果。enrich_lead_emails 现在是异步任务: 调用后立即返回 task_id, 真正处理在后台进行(SMTP 探测慢)。用户问'邮箱补充好了吗''查进度''好了没'或给了 task_id 时调用此工具。返回 status(pending/running/done/failed)、进度 processed/total、结果摘要(verified/guessed 等计数)或错误信息。",
+        description="查询异步任务（search_leads、enrich_lead_emails）的进度和结果。长任务会立即返回 task_id，随后用本工具查询状态与最终摘要。",
         inputSchema={
             "type": "object",
             "properties": {
                 "user_id": {"type": "string", "description": "用户 ID"},
-                "task_id": {"type": "string", "description": "enrich_lead_emails 返回的 task_id"},
+                "task_id": {"type": "string", "description": "异步工具返回的 task_id"},
             },
             "required": ["user_id", "task_id"],
         },
@@ -339,7 +375,7 @@ TOOLS = [
     ),
     Tool(
         name="search_leads",
-        description="【统一发现入口 / 首选】找海外客户线索时调本工具,不要直接调 search_customers/osm_overpass_search/importyeti_lookup/social_profile_lookup。按意图自动路由到对的源: 某国本地经销商/批发商(要邮箱)→ OSM+gosom+hunter+serpapi_maps 多源; 验证某公司真进口过→ ImportYeti 海关; 找品牌/某人社交联系方式→ TikTok/IG; 展会展商→ Tavily 全网搜展商+LLM提取。结果合并、跨源去重、过 LLM 精度过滤(MediaMarkt/Saturn/占位邮箱等一眼假标 invalid),返回存活线索摘要+各源命中数+过滤丢弃数。无法判定意图时默认走经销商路由(最常见)。用户说'搜客户/找买家/找经销商/验这家公司是不是真买家/查某人社交/搜某展会展商'时调本工具。",
+        description="【统一发现入口 / 首选 / 异步】找海外客户线索时调用。立即返回 task_id，随后用 get_task_status 查询。按意图路由到地图、海关、社交或展会数据源，合并去重并可选执行 LLM 过滤；无法判定时默认走经销商路由。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -355,6 +391,91 @@ TOOLS = [
 ]
 
 
+# MCP 客户端无关的 JSON Schema 收口。user_id 是本地存储命名空间，默认从
+# REACHSURGE_USER_ID 读取，不再逼模型在缺少事实时编造一个身份。
+for _tool in TOOLS:
+    _schema = _tool.inputSchema
+    _schema["additionalProperties"] = False
+    _properties = _schema.get("properties", {})
+    if "user_id" in _properties:
+        _properties["user_id"].update({
+            "description": "本地数据命名空间（通常省略；默认固定为 REACHSURGE_USER_ID，未设置则为 default）",
+            "default": DEFAULT_USER_ID,
+            "minLength": 1,
+            "maxLength": 128,
+        })
+        _schema["required"] = [item for item in _schema.get("required", []) if item != "user_id"]
+    if _tool.name == "save_user_config":
+        # Never let a model choose mail endpoints or relay credentials. Legacy
+        # values remain in the DB for migration, but runtime mail config is env-only.
+        for _mail_field in (
+            "smtp_host", "smtp_port", "smtp_user", "smtp_password",
+            "imap_host", "imap_port", "imap_user", "imap_password",
+        ):
+            _properties.pop(_mail_field, None)
+    _enum_values = {
+        "status": ["new", "contacted", "replied", "interested", "not_interested", "invalid"],
+        "email_status": ["valid", "invalid", "unknown", "verified", "existing", "guessed", "catchall", "no_mx"],
+        "language": ["en", "de", "fr", "es", "zh"],
+        "tone": ["professional", "friendly", "direct"],
+        "platform": ["tiktok", "instagram"],
+        "intent": ["distributor", "customs_verify", "social", "exhibition"],
+    }
+    for _name, _values in _enum_values.items():
+        if _name in _properties:
+            _properties[_name]["enum"] = _values
+    if _tool.name == "importyeti_lookup":
+        _schema["required"] = []
+        _schema["anyOf"] = [{"required": ["company_name"]}, {"required": ["company_slug"]}]
+    elif _tool.name == "enrich_company_profile":
+        _schema["anyOf"] = [{"required": ["lead_id"]}, {"required": ["company_name"]}]
+    for _name, _property in _properties.items():
+        if _property.get("type") == "string":
+            _property.setdefault("maxLength", 10_000 if _name in {"body", "content", "product_description"} else 1_000)
+        if _name in {"limit", "n_results"}:
+            _property.update({"minimum": 1, "maximum": 100})
+        elif _name == "max_results":
+            _property.update({"minimum": 1, "maximum": 50})
+        elif _name in {"smtp_port", "imap_port"}:
+            _property.update({"minimum": 1, "maximum": 65535})
+        elif _name == "daily_send_limit":
+            _property.update({"minimum": 1, "maximum": 500})
+        elif _name == "score":
+            _property.update({"minimum": 0, "maximum": 100})
+
+_READ_ONLY_TOOLS = {
+    "get_user_config", "search_knowledge", "list_leads", "verify_email",
+    "compose_outreach", "importyeti_lookup", "social_profile_lookup",
+    "get_task_status", "keypool_status",
+}
+_OPEN_WORLD_TOOLS = {
+    "verify_email", "send_email", "check_inbox", "search_customers",
+    "enrich_lead_emails", "importyeti_lookup", "social_profile_lookup",
+    "enrich_company_profile", "osm_overpass_search", "search_leads",
+}
+for _tool in TOOLS:
+    _tool.annotations = ToolAnnotations(
+        readOnlyHint=_tool.name in _READ_ONLY_TOOLS,
+        destructiveHint=_tool.name == "send_email",
+        idempotentHint=_tool.name in _READ_ONLY_TOOLS,
+        openWorldHint=_tool.name in _OPEN_WORLD_TOOLS,
+    )
+
+
+def _arguments_with_defaults(name: str, arguments: dict | None) -> dict:
+    values = dict(arguments or {})
+    tool = next((item for item in TOOLS if item.name == name), None)
+    if tool and "user_id" in tool.inputSchema.get("properties", {}):
+        values["user_id"] = mcp_user_id(values.get("user_id"))
+    if tool:
+        try:
+            validate_json_schema(values, tool.inputSchema)
+        except ValidationError as exc:
+            path = ".".join(str(part) for part in exc.absolute_path) or "参数"
+            raise ValueError(f"{path} 不符合工具参数约束：{exc.message}") from exc
+    return values
+
+
 # ── Tool handlers ──
 
 @server.list_tools()
@@ -363,10 +484,12 @@ async def list_tools() -> list[Tool]:
 
 
 @server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    logger.info(f"Tool called: {name}, args: {json.dumps(arguments, ensure_ascii=False)[:200]}")
-
+async def call_tool(name: str, arguments: dict) -> list[TextContent] | CallToolResult:
     try:
+        arguments = _arguments_with_defaults(name, arguments)
+        # Values can contain passwords, API keys, email bodies and customer PII.
+        # Log only the shape of the call, never its payload.
+        logger.info("Tool called: %s, argument_keys=%s", name, sorted(arguments))
         if name == "save_user_config":
             result = _handle_save_user_config(arguments)
         elif name == "get_user_config":
@@ -410,11 +533,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         else:
             result = f"❌ 未知工具: {name}"
 
-        return [TextContent(type="text", text=result)]
+        content = [TextContent(type="text", text=result)]
+        if isinstance(result, str) and result.startswith("❌"):
+            return CallToolResult(content=content, isError=True)
+        return content
 
     except Exception as e:
-        logger.exception(f"Tool {name} failed")
-        return [TextContent(type="text", text=f"❌ 工具执行失败: {type(e).__name__}: {e}")]
+        safe_error = redact_text(e)
+        logger.error("Tool %s failed: %s: %s", name, type(e).__name__, safe_error)
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"❌ 工具执行失败: {type(e).__name__}: {safe_error}")],
+            isError=True,
+        )
 
 
 # ── Handler implementations ──
@@ -423,6 +553,10 @@ def _handle_save_user_config(args: dict) -> str:
     user_id = args["user_id"]
     markets = [m.strip() for m in args.get("target_markets", "").split(",") if m.strip()] if args.get("target_markets") else []
 
+    # Preserve previously stored values when a later call updates only product
+    # information.  This also keeps legacy encrypted credentials from being
+    # erased; new users should provide mail secrets via environment variables.
+    existing = get_user_config(user_id) or {}
     config = {
         "user_id": user_id,
         "feishu_open_id": user_id,
@@ -430,14 +564,15 @@ def _handle_save_user_config(args: dict) -> str:
         "industry": args.get("industry", ""),
         "target_markets": markets,
         "product_description": args.get("product_description", ""),
-        "smtp_host": args.get("smtp_host", ""),
-        "smtp_port": args.get("smtp_port", 587),
-        "smtp_user": args.get("smtp_user", ""),
-        "smtp_password": args.get("smtp_password", ""),
-        "imap_host": args.get("imap_host", ""),
-        "imap_user": args.get("imap_user", ""),
-        "imap_password": args.get("imap_password", ""),
-        "daily_send_limit": args.get("daily_send_limit", 30),
+        "smtp_host": existing.get("smtp_host", ""),
+        "smtp_port": existing.get("smtp_port", 587),
+        "smtp_user": existing.get("smtp_user", ""),
+        "smtp_password": existing.get("smtp_password", ""),
+        "imap_host": existing.get("imap_host", ""),
+        "imap_port": existing.get("imap_port", 993),
+        "imap_user": existing.get("imap_user", ""),
+        "imap_password": existing.get("imap_password", ""),
+        "daily_send_limit": args.get("daily_send_limit", existing.get("daily_send_limit", 30)),
     }
 
     upsert_user_config(config)
@@ -465,7 +600,7 @@ def _handle_get_user_config(args: dict) -> str:
     config = get_user_config(user_id)
 
     if not config or not config.get("product_description"):
-        return "📝 你还没有录入产品信息。请告诉我：\n• 你做什么产品？\n• 目标市场是哪些国家？\n• 有邮箱的话也可以一并配置（SMTP/IMAP）"
+        return "📝 你还没有录入产品信息。请告诉我：\n• 你做什么产品？\n• 目标市场是哪些国家？\n邮箱凭证只能由本机所有者写入 .env，不能在对话中提交。"
 
     lines = ["📋 你的当前配置："]
     if config.get("name"):
@@ -674,20 +809,40 @@ def _handle_send_email(args: dict) -> str:
     body = args["body"]
     lead_id = args.get("lead_id", "")
 
-    config = get_user_config(user_id)
-    if not config or not config.get("smtp_host"):
-        return "⚠️ 还没配置发信邮箱。请先用 save_user_config 配置 SMTP（smtp_host/smtp_user/smtp_password）。"
+    enabled = os.environ.get("REACHSURGE_ENABLE_SEND_EMAIL", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return "⛔ 真发信功能默认关闭。只有本机所有者在 .env 设置 REACHSURGE_ENABLE_SEND_EMAIL=1 后才可启用。"
+    if args.get("confirm_send") is not True:
+        return "⛔ 未发送：真发邮件前必须获得用户明确确认，并传 confirm_send=true。"
 
-    smtp_host = config["smtp_host"]
-    smtp_port = config.get("smtp_port") or 587
-    smtp_user = config.get("smtp_user", "")
-    smtp_password = config.get("smtp_password", "")
+    config = get_user_config(user_id)
+    config = config or {}
+    smtp_host = os.environ.get("REACHSURGE_SMTP_HOST", "").strip()
+    smtp_port = int(os.environ.get("REACHSURGE_SMTP_PORT", "") or 587)
+    smtp_user = os.environ.get("REACHSURGE_SMTP_USER", "").strip()
+    smtp_password = os.environ.get("REACHSURGE_SMTP_PASSWORD", "")
     sender_name = config.get("name", "") or "ReachSurge"
 
+    if not smtp_host:
+        return "⚠️ 还没配置发信邮箱。请在 .env 配置 REACHSURGE_SMTP_HOST/USER/PASSWORD。"
     if not smtp_user or not smtp_password:
-        return "⚠️ SMTP 用户名或密码缺失，请用 save_user_config 补全 smtp_user / smtp_password。"
+        return "⚠️ SMTP 用户名或密码缺失，请在 .env 补全 REACHSURGE_SMTP_USER/PASSWORD。"
+    try:
+        validate_public_host(smtp_host, smtp_port)
+    except ValueError as exc:
+        return f"⛔ 未发送：{exc}"
+
+    configured_limit = max(1, min(500, int(config.get("daily_send_limit") or 30)))
+    server_limit = max(1, min(500, int(os.environ.get("REACHSURGE_DAILY_SEND_LIMIT", "30") or 30)))
+    daily_limit = min(configured_limit, server_limit)
+    record_id, used_slots = reserve_outreach_send(
+        user_id, lead_id, subject, body, daily_limit
+    )
+    if not record_id:
+        return f"⛔ 未发送：今天已有 {used_slots} 个发送名额被占用，达到每日上限 {daily_limit} 封。"
 
     import smtplib
+    import ssl
     from email.mime.text import MIMEText
     from email.utils import formataddr, formatdate, make_msgid
 
@@ -699,28 +854,29 @@ def _handle_send_email(args: dict) -> str:
     msg["Message-ID"] = make_msgid()
 
     try:
+        tls_context = ssl.create_default_context()
         if smtp_port == 465:
-            server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30)
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30, context=tls_context)
         else:
             server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
             server.ehlo()
-            server.starttls()
+            server.starttls(context=tls_context)
             server.ehlo()
         server.login(smtp_user, smtp_password)
         server.sendmail(smtp_user, [to_email], msg.as_string())
         server.quit()
     except Exception as e:
-        err = f"{type(e).__name__}: {e}"
-        rid = insert_outreach_record(user_id, lead_id, subject, body, status="failed", error_message=err)
-        return f"❌ 发送失败（已记录 #{rid}）：{err}"
+        err = f"{type(e).__name__}: {redact_text(e)}"
+        finish_outreach_send(user_id, record_id, "failed", err)
+        return f"❌ 发送失败（已记录 #{record_id}）：{err}"
 
-    rid = insert_outreach_record(user_id, lead_id, subject, body, status="sent")
+    finish_outreach_send(user_id, record_id, "sent")
     if lead_id:
         try:
             update_lead_status(user_id, lead_id, "contacted")
         except Exception:
             pass
-    return f"✅ 已发送给 {to_email}（记录 #{rid}）"
+    return f"✅ 已发送给 {to_email}（记录 #{record_id}）"
 
 
 def _handle_check_inbox(args: dict) -> str:
@@ -728,19 +884,25 @@ def _handle_check_inbox(args: dict) -> str:
     user_id = args["user_id"]
     limit = args.get("limit", 20)
 
-    config = get_user_config(user_id)
-    if not config or not config.get("imap_host"):
-        return "⚠️ 还没配置收信邮箱。请先用 save_user_config 配置 IMAP（imap_host/imap_user/imap_password）。"
+    enabled = os.environ.get("REACHSURGE_ENABLE_CHECK_INBOX", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return "⛔ 收件箱读取默认关闭。只有本机所有者在 .env 设置 REACHSURGE_ENABLE_CHECK_INBOX=1 后才可启用。"
 
-    imap_host = config["imap_host"]
-    imap_port = config.get("imap_port") or 993
-    imap_user = config.get("imap_user", "")
-    imap_password = config.get("imap_password", "")
+    imap_host = os.environ.get("REACHSURGE_IMAP_HOST", "").strip()
+    imap_port = int(os.environ.get("REACHSURGE_IMAP_PORT", "") or 993)
+    imap_user = os.environ.get("REACHSURGE_IMAP_USER", "").strip()
+    imap_password = os.environ.get("REACHSURGE_IMAP_PASSWORD", "")
+    if not imap_host:
+        return "⚠️ 还没配置收信邮箱。请在 .env 配置 REACHSURGE_IMAP_HOST/USER/PASSWORD。"
     if not imap_user or not imap_password:
-        return "⚠️ IMAP 用户名或密码缺失，请用 save_user_config 补全 imap_user / imap_password。"
+        return "⚠️ IMAP 用户名或密码缺失，请在 .env 补全 REACHSURGE_IMAP_USER/PASSWORD。"
+    try:
+        validate_public_host(imap_host, imap_port)
+    except ValueError as exc:
+        return f"⛔ 未收信：{exc}"
 
     import os as _os, json as _json
-    safe_uid = user_id.replace("/", "_").replace("\\", "_").replace(":", "_")
+    safe_uid = storage_token(user_id)
     seen_path = _os.path.join(str(DATA_DIR), f"inbox_seen_{safe_uid}.json")
     seen = set()
     if _os.path.exists(seen_path):
@@ -750,13 +912,20 @@ def _handle_check_inbox(args: dict) -> str:
             seen = set()
 
     import imaplib
+    import ssl
     import email
+    import re
     from email.header import decode_header
 
     new_count = 0
+    skipped_large = 0
     summaries = []
+    max_email_bytes = max(
+        64 * 1024,
+        min(50 * 1024 * 1024, int(os.environ.get("REACHSURGE_MAX_EMAIL_BYTES", "5242880") or 5242880)),
+    )
     try:
-        mail = imaplib.IMAP4_SSL(imap_host, imap_port)
+        mail = imaplib.IMAP4_SSL(imap_host, imap_port, ssl_context=ssl.create_default_context())
         mail.login(imap_user, imap_password)
         mail.select("INBOX")
         # 用 UID 而非 sequence number 去重：sequence 会随邮箱删信/清理移位，
@@ -767,6 +936,16 @@ def _handle_check_inbox(args: dict) -> str:
         for uid in recent:
             uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
             if uid_s in seen:
+                continue
+            # Check server-reported size before fetching RFC822, otherwise one
+            # large attachment can force the MCP process to load it all into
+            # memory even though only a short text excerpt is retained.
+            size_typ, size_data = mail.uid("fetch", uid, "(RFC822.SIZE)")
+            size_blob = repr(size_data).encode("utf-8", "replace")
+            size_match = re.search(rb"RFC822\.SIZE\D+(\d+)", size_blob, re.IGNORECASE)
+            if size_typ == "OK" and size_match and int(size_match.group(1)) > max_email_bytes:
+                seen.add(uid_s)
+                skipped_large += 1
                 continue
             typ, msg_data = mail.uid("fetch", uid, "(RFC822)")
             if typ != "OK" or not msg_data or not msg_data[0]:
@@ -807,17 +986,24 @@ def _handle_check_inbox(args: dict) -> str:
         except Exception:
             pass
     except Exception as e:
-        return f"❌ 收信失败：{type(e).__name__}: {e}"
+        return f"❌ 收信失败：{type(e).__name__}: {redact_text(e)}"
 
     try:
         with open(seen_path, "w", encoding="utf-8") as f:
             _json.dump(sorted(seen), f)
+        try:
+            _os.chmod(seen_path, 0o600)
+        except OSError:
+            pass
     except Exception:
         pass
 
+    if new_count == 0 and skipped_large:
+        return f"📭 没有可读取的新回复；已跳过 {skipped_large} 封超过大小上限的邮件。"
     if new_count == 0:
         return "📭 没有新回复。"
-    return f"📬 收到 {new_count} 封新邮件：\n" + "\n".join(summaries)
+    suffix = f"\n另跳过 {skipped_large} 封超过大小上限的邮件。" if skipped_large else ""
+    return f"📬 收到 {new_count} 封新邮件：\n" + "\n".join(summaries) + suffix
 
 
 def _handle_search_customers(args: dict) -> str:
@@ -836,7 +1022,7 @@ def _handle_search_customers(args: dict) -> str:
         from registry import orchestrate, last_errors, enabled_sources
         leads = orchestrate(query=query, country=country, max_results=max_results)
     except Exception as e:
-        return f"❌ 搜索失败: {type(e).__name__}: {e}"
+        return f"❌ 搜索失败: {type(e).__name__}: {redact_text(e)}"
 
     if not leads:
         errs = last_errors()
@@ -923,12 +1109,14 @@ def _enrich_worker(task_id: str, user_id: str, limit: int):
         complete_task(task_id, user_id, summary)
         logger.info(f"[enrich_worker] done task={task_id} summary={summary}")
     except Exception as e:
-        err = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        err = f"{type(e).__name__}: {redact_text(e)}"
         try:
             fail_task(task_id, user_id, err[:4000])
         except Exception:
             logger.exception(f"[enrich_worker] fail_task itself failed task={task_id}")
         logger.exception(f"[enrich_worker] FAILED task={task_id}")
+    finally:
+        _release_task_slot(user_id)
 
 
 def _handle_enrich_lead_emails(args: dict) -> str:
@@ -941,6 +1129,9 @@ def _handle_enrich_lead_emails(args: dict) -> str:
     user_id = args["user_id"]
     limit = args.get("limit", 20)
 
+    if not _reserve_task_slot(user_id):
+        return "⛔ 当前后台任务已达到上限，请等待已有任务完成后再试。"
+
     # 预估 total: 优先 count_pending_leads(真实候选数), 上限 limit
     try:
         pending = count_pending_leads(user_id)
@@ -948,10 +1139,15 @@ def _handle_enrich_lead_emails(args: dict) -> str:
         pending = 0
     total = min(pending, limit) if pending else 0
     if pending == 0:
+        _release_task_slot(user_id)
         return ("📭 当前没有待补全邮箱的线索(所有有网站的线索都已有 verified/existing/catchall 邮箱, 或无网站)。"
                 "\n提示: 先用 search_customers 拉新线索后再补充邮箱。")
 
-    task_id = create_task(user_id, task_type="enrich_lead_emails", limit=limit, total=total)
+    try:
+        task_id = create_task(user_id, task_type="enrich_lead_emails", limit=limit, total=total)
+    except Exception:
+        _release_task_slot(user_id)
+        raise
 
     t = threading.Thread(target=_enrich_worker, args=(task_id, user_id, limit), daemon=True)
     t.start()
@@ -977,7 +1173,7 @@ def _handle_get_task_status(args: dict) -> str:
     try:
         t = get_task(task_id, user_id)
     except Exception as e:
-        return f"❌ 查询失败: {type(e).__name__}: {e}"
+        return f"❌ 查询失败: {type(e).__name__}: {redact_text(e)}"
     if not t:
         # 跨用户查不到或 task_id 错 -> 不泄漏存在性, 统一提示
         return f"❌ 未找到 task_id={task_id} (属于当前用户的任务)。请确认 task_id 正确。"
@@ -994,6 +1190,10 @@ def _handle_get_task_status(args: dict) -> str:
     lines.append(f"创建: {t.get('created_at')}  更新: {t.get('updated_at')}")
 
     if status == "done":
+        if t.get("task_type") == "search_leads":
+            lines.append("")
+            lines.append(t.get("result_summary") or "搜索完成，但没有结果摘要。")
+            return "\n".join(lines)
         try:
             summary = json.loads(t.get("result_summary") or "{}")
             total_s = summary.get("total")
@@ -1026,12 +1226,14 @@ def _handle_importyeti_lookup(args: dict) -> str:
     from sources.customs_importyeti import lookup
     name = (args.get("company_name") or "").strip()
     slug = (args.get("company_slug") or "").strip() or None
+    if not name and slug:
+        name = slug
     if not name:
-        return "❌ 缺少 company_name"
+        return "❌ 缺少 company_name 或 company_slug"
     try:
         r = lookup(name, slug)
     except Exception as e:
-        return f"❌ 查询失败: {type(e).__name__}: {e}"
+        return f"❌ 查询失败: {type(e).__name__}: {redact_text(e)}"
     if not r.get("found"):
         return f"❌ {r.get('error', '未在 ImportYeti 找到该公司')}\n\n提示：仅美国市场有提单数据，且数据滞后到2023年。欧洲经销商/中小公司可能无记录。"
     lines = [
@@ -1071,7 +1273,7 @@ def _handle_social_profile_lookup(args: dict) -> str:
     try:
         r = social_profile_lookup(platform, username)
     except Exception as e:
-        return f"❌ 抓取失败: {type(e).__name__}: {e}"
+        return f"❌ 抓取失败: {type(e).__name__}: {redact_text(e)}"
 
     if r.get("error") and not r.get("followers") and r.get("followers") != 0:
         return (
@@ -1138,7 +1340,7 @@ def _handle_enrich_company_profile(args: dict) -> str:
         r = research(user_id, company_name=company_name, website=website,
                      country=country, lead_id=lead_id)
     except Exception as e:
-        return f"❌ 调研失败: {type(e).__name__}: {e}"
+        return f"❌ 调研失败: {type(e).__name__}: {redact_text(e)}"
 
     if r.get("error"):
         return f"❌ {r['error']}"
@@ -1200,7 +1402,7 @@ def _handle_osm_overpass_search(args: dict) -> str:
     try:
         leads = overpass.search(query=query, country=country, max_results=max_results)
     except Exception as e:
-        return f"❌ Overpass 查询失败: {type(e).__name__}: {e}"
+        return f"❌ Overpass 查询失败: {type(e).__name__}: {redact_text(e)}"
 
     if not leads:
         return (f"🗺️ Overpass 未找到带联系方式的商户。查询: {query} 国家: {country or '全球'}\n"
@@ -1255,7 +1457,7 @@ def _handle_serpapi_maps_search(args: dict) -> str:
         leads = serpapi_maps.search_maps(query=query, country=country,
                                          city=city, max_results=max_results)
     except Exception as e:
-        return f"❌ SerpApi google_maps 查询失败: {type(e).__name__}: {e}"
+        return f"❌ SerpApi google_maps 查询失败: {type(e).__name__}: {redact_text(e)}"
 
     if not leads:
         return (f"🗺️ SerpApi google_maps 未找到商户。查询: {query} 国家: {country or '全球'} 城市: {city or '未指定'}\n"
@@ -1331,7 +1533,7 @@ def _handle_tavily_exhibition(args: dict) -> str:
     try:
         leads = tavily.search_exhibition(query=query, max_results=max_results)
     except Exception as e:
-        return f"❌ Tavily 展会源失败: {type(e).__name__}: {e}"
+        return f"❌ Tavily 展会源失败: {type(e).__name__}: {redact_text(e)}"
 
     if not leads:
         return (f"🎪 Tavily 未搜到展商。查询: {query}\n"
@@ -1580,7 +1782,7 @@ discard 判据 (命中任一即 discard, 否则 keep):
     return kept_ids, discarded_ids, discard_reasons
 
 
-def _handle_search_leads(args: dict) -> str:
+def _run_search_leads(args: dict) -> str:
     """统一发现入口: 意图分类 → 路由源 → 合并去重 → LLM 过滤 → 返回摘要。
 
     源 handler 内部已 lead_exists 去重 + insert_lead 入库 (status=new)。
@@ -1613,19 +1815,19 @@ def _handle_search_leads(args: dict) -> str:
         try:
             osm_res = _handle_osm_overpass_search(sub_args)
         except Exception as e:
-            osm_res = f"❌ OSM Overpass 失败: {type(e).__name__}: {e}"
+            osm_res = f"❌ OSM Overpass 失败: {type(e).__name__}: {redact_text(e)}"
         handler_logs.append(("osm_overpass", osm_res))
         # search_customers (gosom/hunter/europages)
         try:
             sc_res = _handle_search_customers(sub_args)
         except Exception as e:
-            sc_res = f"❌ search_customers 失败: {type(e).__name__}: {e}"
+            sc_res = f"❌ search_customers 失败: {type(e).__name__}: {redact_text(e)}"
         handler_logs.append(("search_customers", sc_res))
         # SerpApi google_maps (第三源: 字段碾压, type_ids 天然 buyer_type)
         try:
             sa_res = _handle_serpapi_maps_search(sub_args)
         except Exception as e:
-            sa_res = f"❌ serpapi_maps 失败: {type(e).__name__}: {e}"
+            sa_res = f"❌ serpapi_maps 失败: {type(e).__name__}: {redact_text(e)}"
         handler_logs.append(("serpapi_maps", sa_res))
 
     elif intent == "customs_verify":
@@ -1634,7 +1836,7 @@ def _handle_search_leads(args: dict) -> str:
         try:
             iy_res = _handle_importyeti_lookup({"company_name": company})
         except Exception as e:
-            iy_res = f"❌ importyeti_lookup 失败: {type(e).__name__}: {e}"
+            iy_res = f"❌ importyeti_lookup 失败: {type(e).__name__}: {redact_text(e)}"
         handler_logs.append(("importyeti", iy_res))
         intent_label = "🛃 海关验真"
         return _format_search_leads_result(intent, intent_label, [], [], {}, handler_logs,
@@ -1662,7 +1864,7 @@ def _handle_search_leads(args: dict) -> str:
         try:
             so_res = _handle_social_profile_lookup({"platform": platform, "username": username})
         except Exception as e:
-            so_res = f"❌ social_profile_lookup 失败: {type(e).__name__}: {e}"
+            so_res = f"❌ social_profile_lookup 失败: {type(e).__name__}: {redact_text(e)}"
         handler_logs.append(("social", so_res))
         intent_label = "📱 社交联系方式"
         return _format_search_leads_result(intent, intent_label, [], [], {}, handler_logs,
@@ -1674,7 +1876,7 @@ def _handle_search_leads(args: dict) -> str:
         try:
             tv_res = _handle_tavily_exhibition(sub_args)
         except Exception as e:
-            tv_res = f"❌ Tavily 展会源失败: {type(e).__name__}: {e}"
+            tv_res = f"❌ Tavily 展会源失败: {type(e).__name__}: {redact_text(e)}"
         handler_logs.append(("tavily_exhibition", tv_res))
 
     else:
@@ -1713,6 +1915,44 @@ def _handle_search_leads(args: dict) -> str:
     surviving = [l for l in new_leads if l["lead_id"] in kept_ids]
     return _format_search_leads_result(intent, intent_labels.get(intent, intent), surviving, discarded_ids,
                                        discard_reasons, handler_logs, source_saved=source_saved)
+
+
+def _search_leads_worker(task_id: str, args: dict):
+    user_id = args["user_id"]
+    try:
+        set_task_running(task_id, user_id)
+        result = _run_search_leads(args)
+        complete_task(task_id, user_id, result)
+    except Exception as exc:
+        safe_error = f"{type(exc).__name__}: {redact_text(exc)}"
+        fail_task(task_id, user_id, safe_error[:4000])
+        logger.error("search_leads task=%s failed: %s", task_id, safe_error)
+    finally:
+        _release_task_slot(user_id)
+
+
+def _handle_search_leads(args: dict) -> str:
+    """Start the long multi-source search without holding the MCP request open."""
+    user_id = args["user_id"]
+    if not _reserve_task_slot(user_id):
+        return "⛔ 当前后台任务已达到上限，请等待已有任务完成后再试。"
+    try:
+        task_id = create_task(user_id, task_type="search_leads", total=1)
+    except Exception:
+        _release_task_slot(user_id)
+        raise
+    worker = threading.Thread(
+        target=_search_leads_worker,
+        args=(task_id, dict(args)),
+        daemon=True,
+        name=f"reachsurge-search-{task_id[:8]}",
+    )
+    worker.start()
+    return (
+        "🚀 线索搜索任务已启动，MCP 请求已立即返回，避免客户端超时。\n"
+        f"task_id: {task_id}\n"
+        "稍后用 get_task_status 查询；搜索完成后会返回完整摘要。"
+    )
 
 
 def _format_search_leads_result(intent: str, intent_label: str, surviving: list,
@@ -1783,5 +2023,10 @@ async def main():
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
-if __name__ == "__main__":
+def run():
+    """Console-script entry point installed as ``reachsurge-mcp``."""
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    run()

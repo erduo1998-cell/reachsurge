@@ -5,7 +5,10 @@
 import re
 import smtplib
 import socket
+import ssl
 import dns.resolver
+
+from security import validate_public_host
 
 # 常见 disposable email 域名
 DISPOSABLE_DOMAINS = {
@@ -51,11 +54,12 @@ def verify_email_smtp(email: str, timeout: int = 10) -> str:
     # 4. SMTP 握手验证
     mx_host = mx_records[0][1]
     try:
+        validate_public_host(mx_host, 25)
         smtp = smtplib.SMTP(mx_host, timeout=timeout)
         smtp.ehlo_or_helo_if_needed()
         # 有些服务器需要 STARTTLS
         try:
-            smtp.starttls()
+            smtp.starttls(context=ssl.create_default_context())
             smtp.ehlo_or_helo_if_needed()
         except smtplib.SMTPException:
             pass

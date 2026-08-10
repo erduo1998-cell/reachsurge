@@ -15,14 +15,13 @@
 """
 import os
 import sqlite3
-import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
-from storage.db import _encrypt_field, _decrypt_field, DATA_DIR
+from storage.db import _encrypt_field, _decrypt_field, _FERNET_CIPHER_PREFIX, DATA_DIR
+from security import mask_url_credentials
 
 KEYPOOL_DB = DATA_DIR / "keypool.db"
 DEFAULT_TENANT = "default"  # 默认租户; 产品化时多租户仍贯穿此字段
@@ -32,9 +31,19 @@ DEFAULT_TENANT = "default"  # 默认租户; 产品化时多租户仍贯穿此字
 
 def _conn() -> sqlite3.Connection:
     KEYPOOL_DB.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(KEYPOOL_DB))
+    c = sqlite3.connect(str(KEYPOOL_DB), timeout=30)
+    try:
+        KEYPOOL_DB.parent.chmod(0o700)
+        KEYPOOL_DB.chmod(0o600)
+    except OSError:
+        pass
     c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA busy_timeout=30000")
+    try:
+        c.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc).lower():
+            raise
     return c
 
 
@@ -91,6 +100,18 @@ def init_keypool():
             );
             CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_log(ts);
         """)
+        # Upgrade proxy URLs written as plaintext by earlier versions. This is
+        # idempotent and runs before any normal read/status path can expose one.
+        plaintext_rows = c.execute(
+            "SELECT proxy_id, proxy_url FROM proxy_pool WHERE proxy_url != ''"
+        ).fetchall()
+        for row in plaintext_rows:
+            value = row["proxy_url"]
+            if value and not value.startswith(_FERNET_CIPHER_PREFIX):
+                c.execute(
+                    "UPDATE proxy_pool SET proxy_url=? WHERE proxy_id=?",
+                    (_encrypt_field(value), row["proxy_id"]),
+                )
         c.commit()
     finally:
         c.close()
@@ -330,12 +351,13 @@ class ProxyPool:
     def add(self, label: str, proxy_url: str, region: str = "",
             source: str = "clash") -> str:
         pid = uuid.uuid4().hex[:16]
+        encrypted_url = _encrypt_field(proxy_url) if proxy_url else ""
         c = _conn()
         try:
             c.execute(
                 "INSERT INTO proxy_pool (proxy_id, label, proxy_url, region, status, source) "
                 "VALUES (?, ?, ?, ?, 'active', ?)",
-                (pid, label, proxy_url, region, source))
+                (pid, label, encrypted_url, region, source))
             c.commit()
         finally:
             c.close()
@@ -351,7 +373,7 @@ class ProxyPool:
         finally:
             c.close()
         if row:
-            return row["proxy_url"]
+            return _decrypt_field(row["proxy_url"], "proxy_url")
         # 回退: 标准代理环境变量 (https_proxy/HTTPS_PROXY/http_proxy/HTTP_PROXY/all_proxy)
         for k in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy"):
             v = os.environ.get(k, "").strip()
@@ -365,4 +387,10 @@ class ProxyPool:
             rows = c.execute("SELECT * FROM proxy_pool ORDER BY created_at").fetchall()
         finally:
             c.close()
-        return [dict(r) for r in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            raw_url = _decrypt_field(item.get("proxy_url", ""), "proxy_url") if item.get("proxy_url") else ""
+            item["proxy_url"] = mask_url_credentials(raw_url)
+            result.append(item)
+        return result

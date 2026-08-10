@@ -6,18 +6,41 @@ import os
 import sys
 import sqlite3
 import json
+import time
 from pathlib import Path
 from typing import Optional
 
 from cryptography.fernet import Fernet, InvalidToken
+from platformdirs import user_data_path
+from security import normalize_user_id, storage_token
 
 _env_data_dir = os.environ.get("LEADGEN_DATA_DIR", "").strip()
-DATA_DIR = Path(_env_data_dir) if _env_data_dir else Path(__file__).parent.parent / "data" / "sqlite"
+_legacy_project_data = Path(__file__).parent.parent / "data"
+_legacy_project_has_data = (
+    (_legacy_project_data / "leadgen_fernet.key").exists()
+    or (_legacy_project_data / "sqlite" / "keypool.db").exists()
+    or any((_legacy_project_data / "sqlite").glob("user_*.db"))
+)
+BASE_DATA_DIR = (
+    Path(_env_data_dir)
+    if _env_data_dir
+    else (_legacy_project_data if _legacy_project_has_data else user_data_path("ReachSurge", "erduo"))
+)
+# Compatibility: older versions treated LEADGEN_DATA_DIR itself as the SQLite
+# directory.  Keep using it when existing DBs prove that layout is in use.
+_legacy_direct_layout = bool(_env_data_dir) and (
+    (BASE_DATA_DIR / "keypool.db").exists() or any(BASE_DATA_DIR.glob("user_*.db"))
+)
+DATA_DIR = BASE_DATA_DIR if _legacy_direct_layout else BASE_DATA_DIR / "sqlite"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    DATA_DIR.chmod(0o700)
+except OSError:
+    pass
 
 # Fernet 密钥目录：与 DATA_DIR 同源(复用 LEADGEN_DATA_DIR)，env 模式直接用 env 值，
 # 否则落到项目根 data/ 目录。密钥文件 leadgen_fernet.key 与 sqlite 子目录并列。
-KEY_DIR = Path(_env_data_dir) if _env_data_dir else Path(__file__).parent.parent / "data"
+KEY_DIR = BASE_DATA_DIR
 
 # Fernet 密文固定前缀，用于判定值是否已被加密
 _FERNET_CIPHER_PREFIX = "gAAAAA"
@@ -45,16 +68,48 @@ def _get_fernet() -> Fernet:
 
     key_file = KEY_DIR / "leadgen_fernet.key"
     key_file.parent.mkdir(parents=True, exist_ok=True)
-    if key_file.exists():
-        key_bytes = key_file.read_bytes().strip()
-    else:
+    try:
+        key_file.parent.chmod(0o700)
+    except OSError:
+        pass
+    try:
+        # O_EXCL elects exactly one writer across MCP client processes sharing
+        # this data directory. Losers read the winner's key instead of caching
+        # a different key that would make newly written ciphertext unreadable.
+        fd = os.open(str(key_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        fd = None
+
+    if fd is not None:
         key_bytes = Fernet.generate_key()
-        # 先写临时文件再 chmod 再 rename，避免明文 key 短暂以默认权限落到磁盘
-        tmp_file = key_file.with_suffix(".key.tmp")
-        tmp_file.write_bytes(key_bytes)
-        tmp_file.chmod(0o600)
-        os.replace(str(tmp_file), str(key_file))
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(key_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            try:
+                key_file.unlink()
+            except OSError:
+                pass
+            raise
+    else:
+        # The winner may have created the file but not finished its tiny write.
+        key_bytes = b""
+        for _ in range(50):
+            try:
+                candidate = key_file.read_bytes().strip()
+                Fernet(candidate)
+                key_bytes = candidate
+                break
+            except (OSError, ValueError):
+                time.sleep(0.02)
+        if not key_bytes:
+            raise RuntimeError(f"加密密钥文件无效或尚未写完：{key_file}")
+    try:
         key_file.chmod(0o600)
+    except OSError:
+        pass
     _fernet_cache = Fernet(key_bytes)
     return _fernet_cache
 
@@ -91,21 +146,33 @@ def _decrypt_field(value, field_name: str):
 
 
 def _get_db_path(user_id: str) -> Path:
-    """每用户独立 SQLite 文件。对 user_id 做安全文件名处理。"""
-    safe_id = user_id.replace("/", "_").replace("\\", "_").replace(":", "_")
-    return DATA_DIR / f"user_{safe_id}.db"
+    """每个本地命名空间一个 SQLite 文件（user_id 不是认证身份）。"""
+    return DATA_DIR / f"user_{storage_token(user_id)}.db"
 
 
 def _get_conn(user_id: str) -> sqlite3.Connection:
     db_path = _get_db_path(user_id)
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = sqlite3.connect(str(db_path), timeout=30)
+    try:
+        db_path.chmod(0o600)
+    except OSError:
+        pass
+    conn.execute("PRAGMA busy_timeout=30000")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as exc:
+        # Another first-start process may be changing this persistent setting.
+        # The connection remains usable; BEGIN IMMEDIATE below still enforces
+        # the send reservation's atomicity.
+        if "locked" not in str(exc).lower():
+            raise
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db(user_id: str):
     """为用户创建数据库表（幂等）。"""
+    user_id = normalize_user_id(user_id)
     conn = _get_conn(user_id)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS user_config (
@@ -197,13 +264,21 @@ def init_db(user_id: str):
     """)
     # 幂等迁移: 老库 leads 表缺列则补
     _cols = [r[1] for r in conn.execute("PRAGMA table_info(leads)").fetchall()]
-    if "buyer_type" not in _cols:
-        conn.execute("ALTER TABLE leads ADD COLUMN buyer_type TEXT DEFAULT ''")
-    # 公司情报字段 (enrich_company_profile 写入)
-    if "signal_level" not in _cols:
-        conn.execute("ALTER TABLE leads ADD COLUMN signal_level TEXT DEFAULT ''")
-    if "company_intel" not in _cols:
-        conn.execute("ALTER TABLE leads ADD COLUMN company_intel TEXT DEFAULT ''")
+    migrations = {
+        "buyer_type": "ALTER TABLE leads ADD COLUMN buyer_type TEXT DEFAULT ''",
+        "signal_level": "ALTER TABLE leads ADD COLUMN signal_level TEXT DEFAULT ''",
+        "company_intel": "ALTER TABLE leads ADD COLUMN company_intel TEXT DEFAULT ''",
+    }
+    for column, statement in migrations.items():
+        if column in _cols:
+            continue
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError as exc:
+            # A parallel first-start process may have added it after our
+            # table_info snapshot. Treat only that exact migration race as OK.
+            if "duplicate column name" not in str(exc).lower():
+                raise
     conn.commit()
     conn.close()
 
@@ -419,6 +494,76 @@ def insert_outreach_record(user_id: str, lead_id: str, subject: str, body: str,
     finally:
         conn.close()
     return record_id
+
+
+def reserve_outreach_send(user_id: str, lead_id: str, subject: str, body: str,
+                          daily_limit: int) -> tuple[Optional[str], int]:
+    """Atomically reserve one daily send slot across all local MCP processes.
+
+    Returns ``(record_id, used_slots)``. A missing record_id means the hard
+    limit was already reached. A crashed sender remains ``sending`` for the
+    current day, intentionally failing closed instead of exceeding the limit.
+    """
+    import uuid as _uuid
+    init_db(user_id)
+    record_id = _uuid.uuid4().hex[:16]
+    conn = _get_conn(user_id)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM outreach_records "
+            "WHERE user_id = ? AND status IN ('sending', 'sent') "
+            "AND date(sent_at, 'localtime') = date('now', 'localtime')",
+            (user_id,),
+        ).fetchone()
+        used = int(row["n"]) if row else 0
+        if used >= daily_limit:
+            conn.rollback()
+            return None, used
+        conn.execute(
+            "INSERT INTO outreach_records "
+            "(record_id, user_id, lead_id, subject, body, status, sent_at) "
+            "VALUES (?, ?, ?, ?, ?, 'sending', datetime('now'))",
+            (record_id, user_id, lead_id or "", subject, body),
+        )
+        conn.commit()
+        return record_id, used + 1
+    finally:
+        conn.close()
+
+
+def finish_outreach_send(user_id: str, record_id: str, status: str,
+                         error_message: str = ""):
+    """Finish a previously reserved send as ``sent`` or ``failed``."""
+    if status not in {"sent", "failed"}:
+        raise ValueError("发送记录状态只能是 sent 或 failed")
+    conn = _get_conn(user_id)
+    try:
+        conn.execute(
+            "UPDATE outreach_records SET status=?, error_message=? WHERE record_id=? AND user_id=?",
+            (status, error_message, record_id, user_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def count_sent_today(user_id: str) -> int:
+    """Count successful sends for the local calendar day (SQLite localtime)."""
+    db_path = _get_db_path(user_id)
+    if not db_path.exists():
+        return 0
+    conn = _get_conn(user_id)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM outreach_records "
+            "WHERE user_id = ? AND status = 'sent' "
+            "AND date(sent_at, 'localtime') = date('now', 'localtime')",
+            (user_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row["n"]) if row else 0
 
 
 def insert_inquiry(user_id: str, from_address: str, subject: str, body: str,
