@@ -4,7 +4,8 @@
 
 依赖 gosom 的 google_maps_scraper 二进制 (内嵌 playwright, 首次运行自动下载
 chromium)。该二进制不随仓库分发, 需自行下载放到项目 bin/google_maps_scraper,
-或用环境变量 GOSOM_BIN 指向任意路径。gosom -email 会爬每个公司官网提取邮箱。
+Windows 则为 bin/google_maps_scraper.exe；也可用环境变量 GOSOM_BIN 指向绝对路径。
+gosom -email 会爬每个公司官网提取邮箱。
 
 通用源 (增强):
 - _COUNTRY 表覆盖全球主要贸易国, 英文名/ISO2/ISO3/中文/本地名 → {lang, iso}
@@ -17,20 +18,77 @@ import os
 import re
 import subprocess
 import tempfile
+from pathlib import Path
 
 from .base import LeadCandidate
 
-ENABLED = True  # 免 docker 二进制已实测稳定
+ENABLED = True  # 可选来源；真正是否可用由 availability() 动态判断
 
-BIN = os.environ.get(
-    "GOSOM_BIN",
-    os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "bin",
-        "google_maps_scraper",
-    ),
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_BIN = _PROJECT_ROOT / "bin" / (
+    "google_maps_scraper.exe" if os.name == "nt" else "google_maps_scraper"
 )
+# Backward-compatible override point for tests and existing integrations. The
+# environment variable is deliberately read by _resolve_binary() at call time:
+# an empty GOSOM_BIN from .env must not replace the default with an empty path.
+BIN = str(_DEFAULT_BIN)
 SOURCE_TAG = "archive"
+
+
+def _resolve_binary() -> Path:
+    """Resolve GOSOM_BIN dynamically, falling back only when it is blank."""
+    configured = (os.environ.get("GOSOM_BIN") or "").strip()
+    raw = configured or str(BIN)
+    return Path(raw).expanduser().resolve()
+
+
+def _has_explicit_binary() -> bool:
+    return bool((os.environ.get("GOSOM_BIN") or "").strip())
+
+
+def availability() -> tuple[bool, str]:
+    """Return whether the optional gosom executable can be used.
+
+    Missing optional dependencies are a normal capability downgrade, not a
+    collection failure. Keep this check side-effect free so the registry and
+    diagnostics can call it before deciding which sources to run.
+    """
+    if not ENABLED:
+        return False, "gosom 来源已关闭"
+
+    configured = (os.environ.get("GOSOM_BIN") or "").strip()
+    if configured and not Path(configured).expanduser().is_absolute():
+        return False, "GOSOM_BIN 必须使用绝对路径"
+
+    path = _resolve_binary()
+    if not path.is_file():
+        if _has_explicit_binary():
+            return False, "GOSOM_BIN 指向的路径不存在或不是普通文件"
+        return False, (
+            "未找到可选的 google_maps_scraper 二进制；"
+            "不影响其他来源。需要时请设置 GOSOM_BIN"
+        )
+    if os.name != "nt" and not os.access(path, os.X_OK):
+        return False, (
+            "google_maps_scraper 没有执行权限；"
+            "不影响其他来源。需要时请为该文件添加执行权限"
+        )
+    return True, "可用"
+
+
+def is_available() -> bool:
+    """Boolean convenience wrapper used by the source registry."""
+    return availability()[0]
+
+
+def configuration_error() -> str:
+    """Return a user-actionable error only when gosom was intentionally set up."""
+    path = _resolve_binary()
+    intended = _has_explicit_binary() or path.exists()
+    if not intended:
+        return ""
+    available, reason = availability()
+    return "" if available else reason
 
 # ---------------------------------------------------------------------------
 # 全球主要贸易国 → {lang (ISO639-1), iso (ISO3166-1 alpha-2)} 映射
@@ -257,20 +315,54 @@ def _proxy_arg() -> str:
     return env_p
 
 
+_SUBPROCESS_ENV_KEYS = {
+    # Process/runtime essentials. ReachSurge provider keys and mail credentials
+    # are intentionally excluded from the third-party gosom process.
+    "PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA",
+    "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",
+    "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+    "SSL_CERT_FILE", "SSL_CERT_DIR",
+}
+
+
+def _subprocess_env() -> dict:
+    """Build a minimal environment without ReachSurge secrets or proxy URLs."""
+    env = {key: value for key, value in os.environ.items()
+           if key.upper() in _SUBPROCESS_ENV_KEYS}
+    # gosom otherwise sends platform/machine telemetry to its upstream service.
+    env["DISABLE_TELEMETRY"] = "1"
+    return env
+
+
+def _write_proxy_file(work: str, proxy: str) -> str:
+    """Write one private proxy URL without exposing credentials in argv."""
+    path = os.path.join(work, "proxies.txt")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(proxy)
+        handle.write("\n")
+    return path
+
+
 def search(query: str, country: str = "", max_results: int = 20) -> list:
     """Run gosom in a private temporary directory that is always removed."""
-    if not ENABLED:
+    available, reason = availability()
+    if not available:
+        if configuration_error():
+            raise RuntimeError(f"gosom 配置无效: {reason}")
         return []
-    if not os.path.exists(BIN):
-        raise RuntimeError(f"gosom 二进制不存在: {BIN}")
+    binary = str(_resolve_binary())
     with tempfile.TemporaryDirectory(prefix="gosom_") as work:
-        return _search_in_workdir(query, country, max_results, work)
+        return _search_in_workdir(query, country, max_results, work, binary=binary)
 
 
-def _search_in_workdir(query: str, country: str, max_results: int, work: str) -> list:
+def _search_in_workdir(query: str, country: str, max_results: int, work: str,
+                       binary: str = "") -> list:
     """Parse gosom JSONL inside a caller-owned temporary directory."""
     qfile = os.path.join(work, "queries.txt")
-    with open(qfile, "w") as f:
+    with open(qfile, "w", encoding="utf-8") as f:
         # gosom 接受自然语言查询; 地域塞进查询更精准
         f.write(f"{query}{' in ' + country if country else ''}\n")
     outdir = os.path.join(work, "out")
@@ -278,7 +370,7 @@ def _search_in_workdir(query: str, country: str, max_results: int, work: str) ->
     rfile = os.path.join(outdir, "r.json")
 
     cmd = [
-        BIN,
+        binary or str(_resolve_binary()),
         "-input", qfile,
         "-results", rfile,
         "-json", "-email",
@@ -288,26 +380,33 @@ def _search_in_workdir(query: str, country: str, max_results: int, work: str) ->
     ]
     proxy = _proxy_arg()
     if proxy:
-        cmd += ["-proxies", proxy]
+        cmd += ["-proxies-file", _write_proxy_file(work, proxy)]
 
-    env = os.environ.copy()
-    if proxy and "@" in proxy:
-        # chromium 下载/额外资源走代理 (无 auth 部分)
-        env["HTTPS_PROXY"] = proxy.split("@", 1)[-1]
-        env["HTTP_PROXY"] = env["HTTPS_PROXY"]
+    env = _subprocess_env()
 
     try:
-        subprocess.run(cmd, check=False, timeout=300, env=env,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        pass
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            timeout=300,
+            env=env,
+            cwd=work,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("gosom 运行超时，未采用可能不完整的结果") from exc
+
+    returncode = getattr(completed, "returncode", 0)
+    if returncode:
+        raise RuntimeError(f"gosom 运行失败（退出码 {returncode}）")
 
     if not os.path.exists(rfile) or os.path.getsize(rfile) == 0:
         return []
 
     # r.json 是 JSONL (每行一个 JSON 对象)
     rows = []
-    with open(rfile) as f:
+    with open(rfile, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:

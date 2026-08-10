@@ -253,13 +253,15 @@ Windows：
 .\.venv\Scripts\playwright.exe install chromium
 ```
 
-`gosom` Google Maps 源还需要独立的 `google_maps_scraper` 二进制。将路径写入 `.env`：
+`gosom` 是高级可选的 Google Maps 来源，需要独立的 `google_maps_scraper` 二进制。ReachSurge 不会把它当作基础依赖：完全未安装时会自动跳过，不再让整次搜索报错，其他来源照常运行。如果你显式填写了错误路径，ReachSurge 会把它报告为 gosom 配置错误，但仍不会中断其他来源。
+
+确实需要这个来源时，从 [gosom/google-maps-scraper 官方 Releases](https://github.com/gosom/google-maps-scraper/releases) 获取与你的系统和 CPU 匹配的版本，再将路径写入 `.env`：
 
 ```dotenv
 GOSOM_BIN=/绝对路径/google_maps_scraper
 ```
 
-不安装时该来源会降级，其他来源不受影响。
+macOS/Linux 还要确保文件有执行权限。ReachSurge 默认关闭 gosom 上游遥测，并避免把本项目的 API Key、邮箱凭证和代理密码暴露给第三方子进程。详细安装和 Agent 自助排查步骤见 [`docs/GOSOM_AGENT_FIX_GUIDE.zh-CN.md`](docs/GOSOM_AGENT_FIX_GUIDE.zh-CN.md)。不要把 gosom 的 Agent Skill 当成这里所需的二进制文件。
 
 ## 真发邮件：默认关闭
 

@@ -60,6 +60,9 @@ data/
 # ── last30days 引擎（独立项目，默认未启用，用户自行安装）──
 last30days/
 
+# ── 可选本机二进制（体积大且按平台分发，不提交仓库）──
+bin/google_maps_scraper*
+
 # ── macOS / 编辑器 / 系统噪声 ──
 .DS_Store
 ._*

@@ -5,6 +5,7 @@
 """
 from sources import last30days_intent, gosom, europages, hunter_discover
 from sources.base import LeadCandidate  # noqa: F401  (re-export)
+from security import redact_text
 
 # source_key -> adapter spec
 SOURCE_REGISTRY = {
@@ -16,7 +17,9 @@ SOURCE_REGISTRY = {
     },
     "gosom_maps": {
         "module": gosom,
-        "enabled": True,    # 免docker二进制实测稳定 (邮箱命中率经多轮验证)
+        # 可选二进制缺失时自动跳过，不能把正常降级记成采集错误。
+        "enabled": gosom.is_available,
+        "configuration_error": gosom.configuration_error,
         "weight": 1.2,      # 档案源信息更完整, 略加权
         "kind": "archive",
     },
@@ -38,16 +41,38 @@ SOURCE_REGISTRY = {
 _last_errors: list = []
 
 
+def _is_enabled(spec: dict) -> bool:
+    """Support static flags and side-effect-free runtime capability checks."""
+    enabled = spec["enabled"]
+    try:
+        return bool(enabled()) if callable(enabled) else bool(enabled)
+    except Exception:
+        # A broken availability probe must degrade the optional source instead
+        # of preventing the whole MCP search from starting.
+        return False
+
+
 def orchestrate(query: str, country: str = "", max_results: int = 20,
                 sources: list = None) -> list:
     """跑选中的源, 合并去重排序, 返回 list[LeadCandidate]。"""
     global _last_errors
     _last_errors = []
 
-    selected = [
-        k for k, v in SOURCE_REGISTRY.items()
-        if v["enabled"] and (sources is None or k in sources)
-    ]
+    selected = []
+    for key, spec in SOURCE_REGISTRY.items():
+        if sources is not None and key not in sources:
+            continue
+        if _is_enabled(spec):
+            selected.append(key)
+            continue
+        error_probe = spec.get("configuration_error")
+        if callable(error_probe):
+            try:
+                reason = error_probe()
+            except Exception:
+                reason = "来源可用性检查失败"
+            if reason:
+                _last_errors.append(f"{key}: 配置错误: {reason}")
 
     pooled = []
     for key in selected:
@@ -57,7 +82,9 @@ def orchestrate(query: str, country: str = "", max_results: int = 20,
         try:
             leads = mod.search(query=query, country=country, max_results=max_results)
         except Exception as e:  # 单源失败不影响其他源
-            _last_errors.append(f"{key}: {type(e).__name__}: {e}")
+            _last_errors.append(
+                f"{key}: {type(e).__name__}: {redact_text(e)}"
+            )
             leads = []
         for lc in leads:
             lc.score = lc.score * weight
@@ -85,4 +112,4 @@ def last_errors() -> list:
 
 
 def enabled_sources() -> list:
-    return [k for k, v in SOURCE_REGISTRY.items() if v["enabled"]]
+    return [k for k, v in SOURCE_REGISTRY.items() if _is_enabled(v)]
