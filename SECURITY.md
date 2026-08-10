@@ -6,7 +6,9 @@ ReachSurge 当前只支持本地 stdio MCP。请不要把进程端口、调试�
 
 ## 报告漏洞
 
-仓库当前尚未启用 GitHub Private vulnerability reporting。启用前，请只开一个不含漏洞细节的公开 Issue，请求维护者建立私密沟通渠道；不要在公开 Issue 中粘贴 API Key、邮箱密码、代理凭证、客户数据或可直接利用的未修复细节。维护者后续应优先开启 GitHub 私密漏洞报告入口。
+仓库已启用 GitHub Private vulnerability reporting。请通过仓库的 [私密漏洞报告入口](https://github.com/erduo1998-cell/reachsurge/security/advisories/new) 提交报告，不要使用公开 Issue、Discussion 或 Pull Request 披露未修复漏洞。
+
+不要在任何公开位置粘贴 API Key、邮箱密码、代理凭证、客户数据或可直接利用的未修复细节。
 
 报告时建议包含：
 
