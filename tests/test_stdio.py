@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -19,7 +20,14 @@ async def _exercise_server(tmp_path):
         "PYTHONUNBUFFERED": "1",
     })
     launcher_name = "reachsurge-mcp.exe" if os.name == "nt" else "reachsurge-mcp"
-    launcher = Path(sys.executable).with_name(launcher_name)
+    candidates = [
+        Path(sys.executable).with_name(launcher_name),
+        Path(sys.executable).parent / "Scripts" / launcher_name,
+    ]
+    located = shutil.which(launcher_name)
+    if located:
+        candidates.append(Path(located))
+    launcher = next((path for path in candidates if path.exists()), candidates[0])
     assert launcher.exists()
     params = StdioServerParameters(
         command=str(launcher),

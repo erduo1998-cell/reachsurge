@@ -1,3 +1,7 @@
+import os
+
+import pytest
+
 import storage.db as db
 import storage.rag as rag
 
@@ -17,6 +21,7 @@ def test_database_and_knowledge_paths_are_bounded(tmp_path, monkeypatch):
     assert list(kb_root.joinpath("alpha").glob("*.json"))
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits do not apply on Windows")
 def test_database_file_is_private_on_posix(tmp_path, monkeypatch):
     db_root = tmp_path / "sqlite"
     db_root.mkdir()
