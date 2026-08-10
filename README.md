@@ -439,6 +439,14 @@ reachsurge/
 └── .env.example           # 空值安全模板
 ```
 
+## 联系作者
+
+使用中遇到问题、有功能建议或希望交流合作，可以扫码添加作者微信。添加时请备注 **ReachSurge**，方便识别来意。
+
+<p align="center">
+  <img src="assets/wechat-qr.jpg" alt="作者耳朵的微信二维码" width="360">
+</p>
+
 ## License
 
 [MIT](LICENSE)
