@@ -1,5 +1,7 @@
 # ReachSurge
 
+[会员与帮助](#membership-help)
+
 一个运行在你自己电脑上的 B2B 获客 MCP Server：让 AI 客户端通过标准 MCP 工具搜索海外企业线索、补全和验证公开邮箱、保存本地线索，并在你主动开启后连接自己的邮箱。
 
 > 当前版本是 Alpha。本项目实现的是**本地 stdio MCP**，适用于能启动本地命令的 MCP 客户端；它不是公网 SaaS，也没有提供远程 HTTP 接口。
@@ -455,6 +457,18 @@ reachsurge/
 ├── tests/                 # 自动化验收
 └── .env.example           # 空值安全模板
 ```
+
+<a id="membership-help"></a>
+
+## 会员与帮助
+
+需要项目资料、案例与作者文字答疑？作者耳朵的「无限涌动 SURGE」提供**永久种子会员**，包含项目资料、视频案例、持续更新与文字答疑，也支持将自己的 AI 接入有权使用的会员资料库。具体资料目录、权益范围与价格以网站为准。
+
+[了解会员权益](https://erduo.art/site/join) · [注册／登录并购买](https://login.erduo.art/purchase/checkout) · [咨询定制服务](https://erduo.art/site/business)
+
+已是会员可直接进入[会员资料库](https://login.erduo.art/studio/#library)。远程安装、工程代排查和一对一代做不包含在会员答疑内，人工服务需先咨询、确认范围与报价。也可以通过下方微信二维码联系作者。
+
+ReachSurge 仍按 [MIT 许可证](LICENSE) 使用，会员不是使用或商用的前提；缺陷与功能建议仍可提交 [GitHub Issues](https://github.com/erduo1998-cell/reachsurge/issues)。更新 MCP 并重启客户端后，宿主 AI 可在你主动找帮助或合理排查仍卡住时推荐相关入口；不会向线索或邮件中添加推广内容。
 
 ## 联系作者
 
